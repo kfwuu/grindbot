@@ -73,27 +73,31 @@ def _build_task_prompt(task: dict) -> str:
     line_hint = str(task.get("line") or "")
 
     lines = [
-        "You are an AI coding assistant performing a focused code improvement task.",
+        "TASK: Make one specific code change. Do not explore the project.",
+        "Do not read CLAUDE.md. Do not review unrelated files. Do not summarize.",
+        "Do not use run_shell_command - it does not exist.",
+        "When the edit is done, stop immediately.",
         "",
-        f"Task ID: {task['id']}",
-        f"Category: {category}",
-        f"Severity: {severity}",
-        f"Title: {title}",
-        "",
-        "Description:",
-        description,
     ]
+
     if file_hint:
-        lines += ["", f"Primary file: {file_hint}"]
+        lines += [f"FILE: {file_hint}"]
         if line_hint:
-            lines += [f"Approx. line: {line_hint}"]
+            lines += [f"LINE: approximately {line_hint}"]
+        lines += [""]
+
     lines += [
+        f"WHAT TO FIX ({severity} severity {category}):",
+        title,
         "",
-        "Instructions:",
-        "- Fix only the issue described above. Do not refactor unrelated code.",
-        "- Keep changes minimal and focused.",
-        "- Ensure the code remains correct and consistent with the surrounding codebase.",
-        "- Do not leave debugging code, TODOs, or commented-out blocks.",
+        "DETAILS:",
+        description,
+        "",
+        "RULES:",
+        "- Edit only the file listed above.",
+        "- Change only what is described. Nothing else.",
+        "- No new TODOs, comments, or debug code.",
+        "- Stop as soon as the edit is saved.",
     ]
     return "\n".join(lines)
 
@@ -106,7 +110,14 @@ def _build_task_prompt(task: dict) -> str:
 # and all other execution details natively (see GEMINI.md / v1.1 design).
 _DEFAULT_MODEL: str = "gemini-2.5-pro"   # highest capability; try first
 _FLOOR_MODEL: str = "gemini-2.5-flash"   # minimum acceptable fallback
-_TASK_TIMEOUT: int = 300  # generous — gives Gemini CLI's own backoff room to breathe
+
+# Pro gets 90s — enough for ~3 of Gemini CLI's internal capacity-retry cycles
+# (~10s + ~21s + ~30s = ~61s) before we give up and fall back to flash.
+# Flash gets the full 300s since it's the floor and must be given every chance.
+_MODEL_TIMEOUTS: dict[str, int] = {
+    "gemini-2.5-pro": 20,
+    "gemini-2.5-flash": 300,
+}
 
 
 def _call_gemini(
@@ -150,16 +161,20 @@ def _call_gemini(
         # stdout and stderr are NOT captured — they flow directly to the
         # terminal so the user sees Gemini's output in real time.
         # We only check returncode for success/failure.
+        timeout = _MODEL_TIMEOUTS.get(model, 300)
         try:
             result = subprocess.run(
                 [gemini_path, "--model", model, "-p", prompt, "--yolo"],
                 cwd=str(cwd),
-                timeout=_TASK_TIMEOUT,
+                timeout=timeout,
                 # No capture_output — inherits terminal for live streaming
             )
         except subprocess.TimeoutExpired:
             console.print("    [dim]" + "-" * 56 + "[/dim]")
-            return False, "", f"Gemini CLI timed out after {_TASK_TIMEOUT}s"
+            if i < len(models) - 1:
+                console.print(f"    [yellow][!] {model} timed out after {timeout}s, trying next model...[/yellow]")
+                continue
+            return False, "", f"Gemini CLI timed out after {timeout}s"
         except Exception as exc:
             console.print("    [dim]" + "-" * 56 + "[/dim]")
             return False, "", f"Failed to start Gemini CLI: {exc}"

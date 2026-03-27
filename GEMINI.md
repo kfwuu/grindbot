@@ -1,6 +1,15 @@
 # GrindBot — Gemini CLI Context
 
-This file is automatically copied into each worktree so Gemini CLI has context when fixing tasks.
+## YOUR ROLE (READ THIS FIRST)
+
+You are in GRIND MODE. You have been given ONE specific task via the `-p` flag.
+
+- Make ONLY that change
+- Do NOT read CLAUDE.md or treat this as a project-build task
+- Do NOT use `run_shell_command` — it does not exist here
+- When the edit is saved, STOP
+
+This file provides project context only. Your instructions are in the `-p` prompt.
 
 ## Project: GrindBot
 
