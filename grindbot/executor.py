@@ -9,9 +9,11 @@ Design rules enforced here:
 """
 
 import os
+import re
 import shutil
 import subprocess
-import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -55,16 +57,20 @@ def _sanitize(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_task_prompt(task: dict) -> str:
+def _build_task_prompt(task: dict, single_file_mode: bool = False) -> str:
     """Build the Gemini CLI prompt string for a single task.
+
+    In single_file_mode the file content is supplied via stdin; Gemini is asked
+    to output ONLY the corrected file — no prose, no fences.  This costs one
+    API call instead of the 3-5 required when Gemini uses its file tools.
 
     Args:
         task: Task dict from tasks.json.
+        single_file_mode: True when file content is piped via stdin.
 
     Returns:
         Multi-line prompt string ready to pass to Gemini CLI via -p.
     """
-    # Sanitize all free-text fields so the prompt is safe on Windows CMD.
     category = _sanitize(task.get("category", "improvement"))
     severity = _sanitize(task.get("severity", "medium"))
     title = _sanitize(task.get("title", f"task-{task['id']}"))
@@ -72,77 +78,201 @@ def _build_task_prompt(task: dict) -> str:
     file_hint = _sanitize(task.get("file") or "")
     line_hint = str(task.get("line") or "")
 
-    lines = [
-        "TASK: Make one specific code change. Do not explore the project.",
-        "Do not read CLAUDE.md. Do not review unrelated files. Do not summarize.",
-        "Do not use run_shell_command - it does not exist.",
-        "When the edit is done, stop immediately.",
-        "",
-    ]
-
-    if file_hint:
-        lines += [f"FILE: {file_hint}"]
+    if single_file_mode:
+        # File content arrives via stdin.  Ask for raw output only.
+        lines = [
+            "The current file content is provided above via stdin.",
+            "Output the COMPLETE corrected file. Nothing else.",
+            "No explanation. No markdown fences. Raw source code only.",
+            "Your response must start with the first character of the file.",
+            "",
+            f"FILE: {file_hint}",
+        ]
         if line_hint:
-            lines += [f"LINE: approximately {line_hint}"]
-        lines += [""]
+            lines += [f"APPROX LINE: {line_hint}"]
+        lines += [
+            "",
+            f"CHANGE NEEDED ({severity} {category}): {title}",
+            "",
+            description,
+        ]
+    else:
+        # No file pre-loaded — Gemini uses its own file tools.
+        lines = [
+            "TASK: Make one specific code change. Do not explore the project.",
+            "Do not read CLAUDE.md. Do not review unrelated files. Do not summarize.",
+            "Do not use run_shell_command - it does not exist.",
+            "When the edit is done, stop immediately.",
+            "",
+        ]
+        if file_hint:
+            lines += [f"FILE: {file_hint}"]
+            if line_hint:
+                lines += [f"LINE: approximately {line_hint}"]
+            lines += [""]
+        lines += [
+            f"WHAT TO FIX ({severity} {category}): {title}",
+            "",
+            description,
+            "",
+            "RULES:",
+            "- Edit only the file listed above.",
+            "- Change only what is described. Nothing else.",
+            "- No new TODOs, comments, or debug code.",
+            "- Stop as soon as the edit is saved.",
+        ]
 
-    lines += [
-        f"WHAT TO FIX ({severity} severity {category}):",
-        title,
-        "",
-        "DETAILS:",
-        description,
-        "",
-        "RULES:",
-        "- Edit only the file listed above.",
-        "- Change only what is described. Nothing else.",
-        "- No new TODOs, comments, or debug code.",
-        "- Stop as soon as the edit is saved.",
-    ]
     return "\n".join(lines)
 
 
+def _strip_fences(text: str) -> str:
+    """Strip markdown code fences if Gemini wrapped its output despite instructions.
+
+    Args:
+        text: Raw stdout from Gemini.
+
+    Returns:
+        File content with fences removed, or the original text unchanged.
+    """
+    text = text.strip()
+    m = re.match(r"^```(?:\w+)?\n(.*?)\n```\s*$", text, re.DOTALL)
+    return m.group(1) if m else text
+
+
 # ---------------------------------------------------------------------------
-# Gemini CLI caller
+# Gemini CLI caller — single-API-call mode + tool-call fallback
 # ---------------------------------------------------------------------------
 
-# GrindBot selects the model; Gemini CLI handles retries, checkpointing,
-# and all other execution details natively (see GEMINI.md / v1.1 design).
-_DEFAULT_MODEL: str = "gemini-2.5-pro"   # highest capability; try first
-_FLOOR_MODEL: str = "gemini-2.5-flash"   # minimum acceptable fallback
+_DEFAULT_MODEL: str = "gemini-2.5-pro"
+_FLOOR_MODEL: str = "gemini-2.5-flash"
 
-# Pro gets 90s — enough for ~3 of Gemini CLI's internal capacity-retry cycles
-# (~10s + ~21s + ~30s = ~61s) before we give up and fall back to flash.
-# Flash gets the full 300s since it's the floor and must be given every chance.
 _MODEL_TIMEOUTS: dict[str, int] = {
     "gemini-2.5-pro": 20,
     "gemini-2.5-flash": 300,
 }
 
 
+def _run_single_file(
+    gemini_path: str,
+    model: str,
+    prompt: str,
+    cwd: Path,
+    file_content: str,
+    timeout: int,
+    console: Console,
+) -> tuple[int, str]:
+    """Pipe file content to Gemini via stdin, stream stderr, capture stdout.
+
+    Costs exactly one API call — Gemini reads from stdin instead of using
+    its file tools, so there are no per-tool-call roundtrips.
+
+    Returns:
+        (returncode, stdout).  returncode -1 means timeout.
+    """
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(file_content)
+            tmp_path = tmp.name
+
+        stdin_fh = open(tmp_path, encoding="utf-8")
+        proc = subprocess.Popen(
+            [gemini_path, "--model", model, "-p", prompt, "--yolo"],
+            cwd=str(cwd),
+            stdin=stdin_fh,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdin_fh.close()
+
+        stdout_lines: list[str] = []
+
+        def _read_stdout() -> None:
+            assert proc.stdout is not None
+            for ln in proc.stdout:
+                stdout_lines.append(ln)
+
+        t = threading.Thread(target=_read_stdout, daemon=True)
+        t.start()
+
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stripped = line.rstrip()
+            if stripped:
+                console.print(f"    {stripped}")
+
+        proc.wait(timeout=timeout)
+        t.join(timeout=5)
+        return proc.returncode, "".join(stdout_lines)
+
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return -1, ""
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _run_tool_mode(
+    gemini_path: str,
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+) -> tuple[int, str]:
+    """Run Gemini in tool mode (no stdin), streaming all output to terminal.
+
+    Fallback for tasks without a known target file.
+
+    Returns:
+        (returncode, "").  returncode -1 means timeout.
+    """
+    try:
+        result = subprocess.run(
+            [gemini_path, "--model", model, "-p", prompt, "--yolo"],
+            cwd=str(cwd),
+            timeout=timeout,
+        )
+        return result.returncode, ""
+    except subprocess.TimeoutExpired:
+        return -1, ""
+    except Exception:
+        return -2, ""
+
+
 def _call_gemini(
     prompt: str,
     cwd: Path,
     console: Console,
+    file_content: Optional[str] = None,
 ) -> tuple[bool, str, Optional[str]]:
-    """Invoke Gemini CLI for a task, falling back from pro to flash on any failure.
+    """Invoke Gemini CLI, using single-API-call mode when file content is supplied.
 
-    Model selection:
-      - Honours ``GRINDBOT_MODEL`` env var if set (single model, no fallback).
-      - Otherwise tries ``gemini-2.5-pro`` first, then ``gemini-2.5-flash``.
-      - Never falls below 2.5-flash.
+    Single-file mode (file_content provided):
+      Pipes the file via stdin so Gemini outputs the corrected version in one
+      API call.  GrindBot then writes the result back to disk.
 
-    Gemini CLI handles retries, rate-limit backoff, checkpointing, and process
-    lifecycle internally — GrindBot does not reimplement those concerns.
+    Tool mode (file_content=None):
+      Gemini uses its built-in file tools; all output streams to terminal.
+      Used as fallback for tasks with no specific target file.
 
     Args:
-        prompt: The task prompt string.
-        cwd: Working directory for the subprocess (the worktree root).
-        console: Rich console for model/status messages.
+        prompt: Task prompt string.
+        cwd: Worktree root directory.
+        console: Rich console for status output.
+        file_content: Current content of the target file, or None for tool mode.
 
     Returns:
-        (success, stdout, error_message).
-        success=False means the task should be marked failed.
+        (success, corrected_content_or_empty, error_message).
     """
     gemini_path = shutil.which("gemini")
     if gemini_path is None:
@@ -155,41 +285,40 @@ def _call_gemini(
         if i > 0:
             console.print(f"    [yellow][!] Falling back to {model}...[/yellow]")
 
-        console.print(f"    [dim]Using model: {model}[/dim]")
+        mode_label = "single-file" if file_content is not None else "tool"
+        console.print(f"    [dim]Model: {model}  ({mode_label} mode)[/dim]")
         console.print("    [dim]" + "-" * 56 + "[/dim]")
 
-        # stdout and stderr are NOT captured — they flow directly to the
-        # terminal so the user sees Gemini's output in real time.
-        # We only check returncode for success/failure.
         timeout = _MODEL_TIMEOUTS.get(model, 300)
-        try:
-            result = subprocess.run(
-                [gemini_path, "--model", model, "-p", prompt, "--yolo"],
-                cwd=str(cwd),
-                timeout=timeout,
-                # No capture_output — inherits terminal for live streaming
+
+        if file_content is not None:
+            rc, stdout = _run_single_file(
+                gemini_path, model, prompt, cwd, file_content, timeout, console
             )
-        except subprocess.TimeoutExpired:
-            console.print("    [dim]" + "-" * 56 + "[/dim]")
+        else:
+            rc, stdout = _run_tool_mode(gemini_path, model, prompt, cwd, timeout)
+
+        console.print("    [dim]" + "-" * 56 + "[/dim]")
+
+        if rc == -1:
             if i < len(models) - 1:
-                console.print(f"    [yellow][!] {model} timed out after {timeout}s, trying next model...[/yellow]")
+                console.print(
+                    f"    [yellow][!] {model} timed out after {timeout}s, "
+                    f"trying next model...[/yellow]"
+                )
                 continue
             return False, "", f"Gemini CLI timed out after {timeout}s"
-        except Exception as exc:
-            console.print("    [dim]" + "-" * 56 + "[/dim]")
-            return False, "", f"Failed to start Gemini CLI: {exc}"
 
-        console.print("    [dim]" + "-" * 56 + "[/dim]")
+        if rc == 0:
+            return True, stdout, None
 
-        if result.returncode == 0:
-            return True, "", None
-
-        # Non-zero exit — try next model if one is available.
         if i < len(models) - 1:
-            console.print(f"    [yellow][!] {model} exited {result.returncode}, trying next model...[/yellow]")
+            console.print(
+                f"    [yellow][!] {model} exited {rc}, trying next model...[/yellow]"
+            )
             continue
 
-        return False, "", f"Gemini CLI exited with code {result.returncode}"
+        return False, "", f"Gemini CLI exited with code {rc}"
 
     return False, "", "All models failed"
 
@@ -271,15 +400,41 @@ def execute_task(
             shutil.copy2(str(gemini_md), str(worktree_path / "GEMINI.md"))
 
         # ---- c. Call Gemini CLI --------------------------------------------
-        console.print("    [dim]Calling Gemini CLI...[/dim]")
-        prompt = _build_task_prompt(task)
-        gem_ok, _gem_out, gem_err = _call_gemini(prompt, worktree_path, console)
+        # Single-file mode: read the target file ourselves and pipe it in.
+        # Gemini outputs the corrected version in one API call; we write it back.
+        # Falls back to tool mode if the task has no specific file or it's missing.
+        file_hint = task.get("file") or ""
+        file_content: Optional[str] = None
+        if file_hint:
+            target = worktree_path / file_hint
+            if target.exists():
+                try:
+                    file_content = target.read_text(encoding="utf-8")
+                except OSError:
+                    file_content = None
+
+        single_file = file_content is not None
+        console.print(
+            f"    [dim]Calling Gemini CLI "
+            f"({'single-file' if single_file else 'tool'} mode)...[/dim]"
+        )
+        prompt = _build_task_prompt(task, single_file_mode=single_file)
+        gem_ok, gem_out, gem_err = _call_gemini(
+            prompt, worktree_path, console, file_content=file_content
+        )
 
         if not gem_ok:
             console.print(f"    [red]!! Gemini CLI failed:[/red] {gem_err}")
             task["status"] = "failed"
             task["error"] = gem_err
             return task
+
+        # In single-file mode write Gemini's output back to the target file.
+        if single_file and gem_out.strip():
+            corrected = _strip_fences(gem_out)
+            target = worktree_path / file_hint
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(corrected, encoding="utf-8")
 
         # ---- d. Show which files changed -----------------------------------
         changed_preview = wt.get_changed_files(worktree_path)
