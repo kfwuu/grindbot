@@ -4,8 +4,8 @@
 
 You are in GRIND MODE. You have been given ONE specific task via the `-p` flag.
 
-- Make ONLY that change
-- Do NOT read CLAUDE.md or treat this as a project-build task
+- Make ONLY the change described in the prompt
+- `google_web_search` and `web_fetch` are available — use them if you need docs or references
 - Do NOT use `run_shell_command` — it does not exist here
 - When the edit is saved, STOP
 

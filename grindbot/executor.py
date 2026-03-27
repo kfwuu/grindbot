@@ -97,14 +97,10 @@ def _build_task_prompt(task: dict, single_file_mode: bool = False) -> str:
             description,
         ]
     else:
-        # No file pre-loaded — Gemini uses its own file tools.
-        lines = [
-            "TASK: Make one specific code change. Do not explore the project.",
-            "Do not read CLAUDE.md. Do not review unrelated files. Do not summarize.",
-            "Do not use run_shell_command - it does not exist.",
-            "When the edit is done, stop immediately.",
-            "",
-        ]
+        # No file pre-loaded — Gemini uses its own file and web tools.
+        # google_web_search and web_fetch are available and encouraged when
+        # looking up docs, APIs, or best practices relevant to the fix.
+        lines = ["TASK: Make one specific code change.", ""]
         if file_hint:
             lines += [f"FILE: {file_hint}"]
             if line_hint:
@@ -116,7 +112,6 @@ def _build_task_prompt(task: dict, single_file_mode: bool = False) -> str:
             description,
             "",
             "RULES:",
-            "- Edit only the file listed above.",
             "- Change only what is described. Nothing else.",
             "- No new TODOs, comments, or debug code.",
             "- Stop as soon as the edit is saved.",
@@ -160,15 +155,25 @@ def _run_single_file(
     file_content: str,
     timeout: int,
     console: Console,
+    system_md_path: Optional[Path] = None,
 ) -> tuple[int, str]:
     """Pipe file content to Gemini via stdin, stream stderr, capture stdout.
 
     Costs exactly one API call — Gemini reads from stdin instead of using
     its file tools, so there are no per-tool-call roundtrips.
 
+    Args:
+        system_md_path: Absolute path to GEMINI.md; passed to the subprocess
+            as the GEMINI_SYSTEM_MD environment variable so Gemini CLI loads
+            it as a system prompt without needing the file inside the worktree.
+
     Returns:
         (returncode, stdout).  returncode -1 means timeout.
     """
+    env = os.environ.copy()
+    if system_md_path is not None and system_md_path.exists():
+        env["GEMINI_SYSTEM_MD"] = str(system_md_path)
+
     tmp_path: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -185,6 +190,7 @@ def _run_single_file(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
         )
         stdin_fh.close()
 
@@ -228,19 +234,30 @@ def _run_tool_mode(
     prompt: str,
     cwd: Path,
     timeout: int,
+    system_md_path: Optional[Path] = None,
 ) -> tuple[int, str]:
     """Run Gemini in tool mode (no stdin), streaming all output to terminal.
 
     Fallback for tasks without a known target file.
 
+    Args:
+        system_md_path: Absolute path to GEMINI.md; injected as
+            GEMINI_SYSTEM_MD so Gemini loads the system prompt without
+            requiring the file to be present inside the worktree.
+
     Returns:
         (returncode, "").  returncode -1 means timeout.
     """
+    env = os.environ.copy()
+    if system_md_path is not None and system_md_path.exists():
+        env["GEMINI_SYSTEM_MD"] = str(system_md_path)
+
     try:
         result = subprocess.run(
             [gemini_path, "--model", model, "-p", prompt, "--yolo"],
             cwd=str(cwd),
             timeout=timeout,
+            env=env,
         )
         return result.returncode, ""
     except subprocess.TimeoutExpired:
@@ -254,6 +271,7 @@ def _call_gemini(
     cwd: Path,
     console: Console,
     file_content: Optional[str] = None,
+    system_md_path: Optional[Path] = None,
 ) -> tuple[bool, str, Optional[str]]:
     """Invoke Gemini CLI, using single-API-call mode when file content is supplied.
 
@@ -270,6 +288,9 @@ def _call_gemini(
         cwd: Worktree root directory.
         console: Rich console for status output.
         file_content: Current content of the target file, or None for tool mode.
+        system_md_path: Absolute path to GEMINI.md, passed as GEMINI_SYSTEM_MD
+            env var so Gemini loads the system prompt from the canonical source
+            instead of looking for the file inside the worktree.
 
     Returns:
         (success, corrected_content_or_empty, error_message).
@@ -293,10 +314,14 @@ def _call_gemini(
 
         if file_content is not None:
             rc, stdout = _run_single_file(
-                gemini_path, model, prompt, cwd, file_content, timeout, console
+                gemini_path, model, prompt, cwd, file_content, timeout, console,
+                system_md_path=system_md_path,
             )
         else:
-            rc, stdout = _run_tool_mode(gemini_path, model, prompt, cwd, timeout)
+            rc, stdout = _run_tool_mode(
+                gemini_path, model, prompt, cwd, timeout,
+                system_md_path=system_md_path,
+            )
 
         console.print("    [dim]" + "-" * 56 + "[/dim]")
 
@@ -361,7 +386,7 @@ def execute_task(
 
     Steps:
       a. Create worktree on a fresh branch.
-      b. Copy GEMINI.md into the worktree for context.
+      b. Resolve GEMINI.md path and pass it as GEMINI_SYSTEM_MD env var.
       c. Call Gemini CLI with the task prompt.
       d. Validate changes (files changed, syntax, tests).
       e. Commit if valid; mark failed otherwise.
@@ -394,10 +419,15 @@ def execute_task(
         return task
 
     try:
-        # ---- b. Copy GEMINI.md for context ---------------------------------
+        # ---- b. Resolve GEMINI.md for GEMINI_SYSTEM_MD env var -------------
+        # The file stays in the repo root — no copy into the worktree needed.
+        system_md_path: Optional[Path] = None
         gemini_md = repo_root / "GEMINI.md"
         if gemini_md.exists():
-            shutil.copy2(str(gemini_md), str(worktree_path / "GEMINI.md"))
+            system_md_path = gemini_md
+            console.print(f"    [dim]GEMINI_SYSTEM_MD -> {gemini_md}[/dim]")
+        else:
+            console.print("    [dim]GEMINI.md not found; running without system prompt.[/dim]")
 
         # ---- c. Call Gemini CLI --------------------------------------------
         # Single-file mode: read the target file ourselves and pipe it in.
@@ -420,7 +450,9 @@ def execute_task(
         )
         prompt = _build_task_prompt(task, single_file_mode=single_file)
         gem_ok, gem_out, gem_err = _call_gemini(
-            prompt, worktree_path, console, file_content=file_content
+            prompt, worktree_path, console,
+            file_content=file_content,
+            system_md_path=system_md_path,
         )
 
         if not gem_ok:
