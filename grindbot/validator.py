@@ -1,0 +1,176 @@
+"""Validates changes made by Gemini CLI inside a worktree.
+
+Checks (in order):
+  1. At least one file was changed.
+  2. All modified .py files parse without SyntaxError.
+  3. If pytest is available and a tests/ directory exists, the test suite passes.
+"""
+
+import ast
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+@dataclass
+class ValidationResult:
+    """Outcome of validating Gemini CLI changes in a worktree."""
+
+    success: bool
+    """True if all checks passed."""
+
+    error: Optional[str] = None
+    """Human-readable failure reason, or None on success."""
+
+    changed_files: list[str] = field(default_factory=list)
+    """Relative paths of files that were changed."""
+
+    warnings: list[str] = field(default_factory=list)
+    """Non-fatal warnings (e.g. tests skipped)."""
+
+
+def validate_changes(worktree_path: Path, task: dict) -> ValidationResult:
+    """Run all validation checks on a worktree after Gemini CLI has run.
+
+    Args:
+        worktree_path: Absolute path to the git worktree directory.
+        task: The task dict (used for context in error messages).
+
+    Returns:
+        ValidationResult with success flag and details.
+    """
+    # --- 1. Check that something actually changed ---
+    changed_files = _get_changed_files(worktree_path)
+    if not changed_files:
+        return ValidationResult(
+            success=False,
+            error="No files were changed - Gemini CLI may not have made any edits",
+        )
+
+    # --- 2. Syntax-check all modified Python files ---
+    syntax_ok, syntax_error = _check_python_syntax(worktree_path, changed_files)
+    if not syntax_ok:
+        return ValidationResult(
+            success=False,
+            error=syntax_error,
+            changed_files=changed_files,
+        )
+
+    # --- 3. Run tests if available ---
+    tests_ok, tests_error, tests_warning = _check_tests(worktree_path)
+    if not tests_ok:
+        return ValidationResult(
+            success=False,
+            error=tests_error,
+            changed_files=changed_files,
+        )
+
+    warnings = [tests_warning] if tests_warning else []
+    return ValidationResult(
+        success=True,
+        changed_files=changed_files,
+        warnings=warnings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_changed_files(worktree_path: Path) -> list[str]:
+    """Return relative paths of all files modified or added in the worktree.
+
+    Args:
+        worktree_path: Absolute path to the git worktree directory.
+
+    Returns:
+        List of relative file path strings.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    files: list[str] = []
+    for line in result.stdout.splitlines():
+        if line.strip():
+            files.append(line[3:].strip())
+    return files
+
+
+def _check_python_syntax(
+    worktree_path: Path,
+    changed_files: list[str],
+) -> tuple[bool, Optional[str]]:
+    """Parse every changed .py file and report the first SyntaxError found.
+
+    Args:
+        worktree_path: Root of the worktree.
+        changed_files: List of relative file paths to check.
+
+    Returns:
+        (True, None) if all files parse OK, (False, error_message) otherwise.
+    """
+    for rel_path in changed_files:
+        if not rel_path.endswith(".py"):
+            continue
+        full_path = worktree_path / rel_path
+        if not full_path.exists():
+            continue  # Deleted file - skip
+        try:
+            source = full_path.read_text(encoding="utf-8", errors="replace")
+            ast.parse(source, filename=rel_path)
+        except SyntaxError as exc:
+            return False, f"Syntax error in {rel_path} (line {exc.lineno}): {exc.msg}"
+        except Exception as exc:
+            return False, f"Could not parse {rel_path}: {exc}"
+    return True, None
+
+
+def _check_tests(
+    worktree_path: Path,
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Run pytest if it is available and a tests/ directory exists.
+
+    Args:
+        worktree_path: Root of the worktree.
+
+    Returns:
+        Tuple of (passed, error_message, warning_message).
+        If tests are skipped (no pytest / no tests dir), returns (True, None, warning).
+    """
+    # Check pytest availability
+    pytest_check = subprocess.run(
+        ["python", "-m", "pytest", "--version"],
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    if pytest_check.returncode != 0:
+        return True, None, "pytest not available - tests skipped"
+
+    # Check for a tests directory
+    tests_dir = worktree_path / "tests"
+    if not tests_dir.exists():
+        return True, None, "No tests/ directory found - tests skipped"
+
+    try:
+        result = subprocess.run(
+            ["python", "-m", "pytest", "tests/", "-q", "--tb=short", "--no-header"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Test suite timed out after 120 seconds", None
+
+    if result.returncode != 0:
+        # Cap output to avoid overwhelming the task record
+        combined = (result.stdout + result.stderr)[-2000:]
+        return False, f"Tests failed:\n{combined}", None
+
+    return True, None, None

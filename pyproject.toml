@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grindbot"
+version = "0.1.0"
+description = "Autonomous code improvement via Gemini CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+]
+
+[project.scripts]
+grindbot = "grindbot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["grindbot*"]
