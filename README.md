@@ -35,7 +35,7 @@ grindbot report
 - Python 3.10+
 - [Gemini CLI](https://github.com/google-gemini/gemini-cli) on PATH (`gemini` must be on your `$PATH`)
 - Git
-- A [Kie.ai](https://kie.ai) API key — GrindBot's brain is Claude Opus 4.6 running through Kie.ai
+- A [Kie.ai](https://kie.ai?ref=c63d12fefd3e95415e600f2ea64e4050) API key — GrindBot's brain is Claude Opus 4.6 running through Kie.ai
 
 ## Setup
 
@@ -46,7 +46,7 @@ pip install -e .
 
 **2. Get a Kie.ai API key**
 
-Go to [kie.ai](https://kie.ai), create an account, and copy your API key.
+Go to [kie.ai](https://kie.ai?ref=c63d12fefd3e95415e600f2ea64e4050), create an account, and copy your API key.
 
 **3. Set the key in `~/.env`**
 
