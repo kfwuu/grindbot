@@ -3,7 +3,8 @@
 Checks (in order):
   1. At least one file was changed.
   2. All modified .py files parse without SyntaxError.
-  3. If pytest is available and a tests/ directory exists, the test suite passes.
+  3. Pyrefly type-checks modified .py files (non-fatal, reported as warnings).
+  4. If pytest is available and a tests/ directory exists, the test suite passes.
 """
 
 import ast
@@ -57,16 +58,22 @@ def validate_changes(worktree_path: Path, task: dict) -> ValidationResult:
             changed_files=changed_files,
         )
 
-    # --- 3. Run tests if available ---
+    # --- 3. Pyrefly type check (non-fatal) ---
+    pyrefly_warnings = _check_pyrefly(worktree_path, changed_files)
+
+    # --- 4. Run tests if available ---
     tests_ok, tests_error, tests_warning = _check_tests(worktree_path)
     if not tests_ok:
         return ValidationResult(
             success=False,
             error=tests_error,
             changed_files=changed_files,
+            warnings=pyrefly_warnings,
         )
 
-    warnings = [tests_warning] if tests_warning else []
+    warnings = pyrefly_warnings[:]
+    if tests_warning:
+        warnings.append(tests_warning)
     return ValidationResult(
         success=True,
         changed_files=changed_files,
@@ -128,6 +135,53 @@ def _check_python_syntax(
         except Exception as exc:
             return False, f"Could not parse {rel_path}: {exc}"
     return True, None
+
+
+def _check_pyrefly(
+    worktree_path: Path,
+    changed_files: list[str],
+) -> list[str]:
+    """Run pyrefly on modified Python files and return type errors as warnings.
+
+    Non-fatal — existing codebases may have pre-existing type errors unrelated
+    to Gemini's changes. Errors are surfaced as warnings so the grind loop
+    continues and the reviewer can judge severity.
+
+    Args:
+        worktree_path: Root of the worktree.
+        changed_files: List of relative file paths to check.
+
+    Returns:
+        List of warning strings (empty if pyrefly is unavailable or clean).
+    """
+    import shutil
+    if shutil.which("pyrefly") is None:
+        return []
+
+    py_files = [
+        f for f in changed_files
+        if f.endswith(".py") and (worktree_path / f).exists()
+    ]
+    if not py_files:
+        return []
+
+    try:
+        result = subprocess.run(
+            ["pyrefly", "check"] + py_files,
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        return ["pyrefly timed out or crashed — type check skipped"]
+
+    if result.returncode == 0:
+        return []
+
+    # Cap output so it doesn't overflow the task record
+    output = (result.stdout + result.stderr).strip()[:1000]
+    return [f"pyrefly type errors (non-fatal):\n{output}"]
 
 
 def _check_tests(

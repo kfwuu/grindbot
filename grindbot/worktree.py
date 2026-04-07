@@ -174,6 +174,8 @@ def merge_branch(
 ) -> tuple[bool, Optional[str]]:
     """Merge a branch into the current HEAD with no-fast-forward.
 
+    Stashes any uncommitted working-tree changes before merging and restores
+    them afterwards, so GrindBot is safe to run against a repo with WIP edits.
     If git detects a merge conflict the merge is aborted automatically so
     the repository is left in a clean state.
 
@@ -185,7 +187,7 @@ def merge_branch(
     Returns:
         (True, None) on success, (False, error_message) on conflict/failure.
     """
-    # Determine the default branch (main or master)
+    # Guard: ensure HEAD is on main/master before merging (Gemini fix for task-001).
     default_branch_result = subprocess.run(
         ["git", "symbolic-ref", "--short", "HEAD"],
         cwd=str(repo_root),
@@ -199,13 +201,22 @@ def merge_branch(
             "Ensure the main repository is on the default branch before merging.",
         )
     current_branch = default_branch_result.stdout.strip()
-    # Accept only main or master as valid merge targets
     if current_branch not in ("main", "master"):
         return (
             False,
             f"repo_root HEAD is on '{current_branch}', expected 'main' or 'master'. "
             "Aborting merge to avoid merging into the wrong branch.",
         )
+
+    # Stash uncommitted changes so they don't block the merge.
+    stash_result = subprocess.run(
+        ["git", "stash", "--include-untracked", "-m", f"grindbot-pre-merge-{branch_name}"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    stashed = "No local changes" not in stash_result.stdout
+
     result = subprocess.run(
         ["git", "merge", branch_name, "--no-ff", "-m", f"Merge {branch_name}"],
         cwd=str(repo_root),
@@ -213,15 +224,30 @@ def merge_branch(
         text=True,
     )
     if result.returncode != 0:
-        # Abort to leave the repo clean
         subprocess.run(
             ["git", "merge", "--abort"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
         )
+        if stashed:
+            subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+            )
         err = result.stderr.strip() or result.stdout.strip() or "git merge failed"
         return False, err
+
+    if stashed:
+        subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+
     return True, None
 
 
@@ -249,6 +275,156 @@ def get_changed_files(worktree_path: Path) -> list[str]:
             # Porcelain format: "XY filename" - filename starts at column 3
             files.append(line[3:].strip())
     return files
+
+
+def get_diff(worktree_path: Path) -> str:
+    """Return a combined diff of all changes in the worktree.
+
+    Captures modifications to tracked files (git diff) plus a listing of
+    any untracked new files, so the Claude reviewer always has full context.
+
+    Args:
+        worktree_path: Absolute path to the git worktree directory.
+
+    Returns:
+        Diff text, or empty string if no changes are detected.
+    """
+    # Modifications to tracked files (unstaged)
+    diff_result = subprocess.run(
+        ["git", "diff"],
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    diff = diff_result.stdout
+
+    # New untracked files not shown by git diff
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    new_files = [
+        line[3:].strip()
+        for line in status_result.stdout.splitlines()
+        if line.startswith("?? ")
+    ]
+    if new_files:
+        diff += "\n--- New untracked files ---\n" + "\n".join(new_files)
+
+    return diff
+
+
+def get_default_branch(repo_root: Path) -> str:
+    """Return the name of the current branch at repo_root (master or main).
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+
+    Returns:
+        Branch name string, defaults to 'master' if detection fails.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    branch = result.stdout.strip()
+    return branch if branch else "master"
+
+
+def push_branch(
+    repo_root: Path,
+    branch_name: str,
+    remote: str = "origin",
+) -> tuple[bool, Optional[str]]:
+    """Push a branch to a remote. No-ops with a warning if no remote exists.
+
+    Never uses --force. Only pushes the named branch, never HEAD or main
+    directly, so there is no risk of overwriting remote history.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        branch_name: Local branch name to push.
+        remote: Remote name (default 'origin').
+
+    Returns:
+        (True, None) on success or if no remote configured,
+        (False, error_message) on push failure.
+    """
+    # Check remote exists
+    check = subprocess.run(
+        ["git", "remote", "get-url", remote],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        return True, None  # No remote - silently skip, not an error
+
+    result = subprocess.run(
+        ["git", "push", remote, branch_name],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "git push failed"
+    return True, None
+
+
+def revert_last_commit(
+    repo_root: Path,
+    remote: str = "origin",
+) -> tuple[bool, Optional[str]]:
+    """Revert HEAD with a new commit and push if a remote exists.
+
+    Non-destructive safety net — creates a revert commit rather than
+    resetting history, so nothing is ever lost.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        remote: Remote name to push the revert to (default 'origin').
+
+    Returns:
+        (True, None) on success, (False, error_message) on failure.
+    """
+    result = subprocess.run(
+        ["git", "revert", "HEAD", "--no-edit"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "git revert HEAD failed"
+
+    # Best-effort push of the revert commit
+    default_branch = get_default_branch(repo_root)
+    push_branch(repo_root, default_branch, remote=remote)
+
+    return True, None
+
+
+def get_head_diff(repo_root: Path) -> str:
+    """Return the full diff of the most recent commit on the current branch.
+
+    Used by the post-merge Claude reviewer to see exactly what landed.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+
+    Returns:
+        git show HEAD output as a string, or empty string on failure.
+    """
+    result = subprocess.run(
+        ["git", "show", "HEAD", "--stat", "-p"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout if result.returncode == 0 else ""
 
 
 # ---------------------------------------------------------------------------

@@ -129,6 +129,47 @@ def save_tasks(project_path: str | Path, tasks: list[dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Prompt store persistence
+# ---------------------------------------------------------------------------
+
+
+def load_prompt_store(grindbot_dir: Path) -> dict:
+    """Load evolved prompt overrides from .grindbot/prompts.json.
+
+    Args:
+        grindbot_dir: Absolute path to the .grindbot/ directory.
+
+    Returns:
+        Prompt store dict, or empty dict if file is missing or corrupt.
+    """
+    path = grindbot_dir / "prompts.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_prompt_store(grindbot_dir: Path, store: dict) -> None:
+    """Persist prompt store to .grindbot/prompts.json.
+
+    Args:
+        grindbot_dir: Absolute path to the .grindbot/ directory.
+        store: Prompt store dict to persist.
+    """
+    path = grindbot_dir / "prompts.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(store, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        console.print(f"[red]Error saving prompts.json: {exc}[/red]")
+
+
+# ---------------------------------------------------------------------------
 # Project initialisation
 # ---------------------------------------------------------------------------
 

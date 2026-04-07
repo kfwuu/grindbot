@@ -8,6 +8,7 @@ Design rules enforced here:
   - All errors caught, task marked failed, grind loop continues (rule #8)
 """
 
+import ast
 import os
 import re
 import shutil
@@ -22,7 +23,27 @@ from rich.console import Console
 from rich.panel import Panel
 
 from . import worktree as wt
+from . import brain
 from .validator import validate_changes
+
+
+# ---------------------------------------------------------------------------
+# Prompt override injection (filled by cli.py before each grind run)
+# ---------------------------------------------------------------------------
+
+_PROMPT_OVERRIDES: dict = {}
+
+
+def load_prompt_overrides(store: dict) -> None:
+    """Inject evolved prompts from the prompt store into this module.
+
+    Called by cli.py after loading .grindbot/prompts.json, before grind starts.
+
+    Args:
+        store: Full prompt store dict as returned by config.load_prompt_store().
+    """
+    global _PROMPT_OVERRIDES
+    _PROMPT_OVERRIDES = store.get("prompts", {})
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +73,29 @@ def _sanitize(text: str) -> str:
     return "".join(c if c in _SAFE_CHARS else " " for c in (text or ""))
 
 
+# Characters that break Windows CMD when gemini is invoked as a .cmd wrapper.
+# Only these need to be stripped from Claude-written prompts — everything else
+# (brackets, equals, apostrophes, backticks, newlines) is safe inside a
+# double-quoted argument as produced by subprocess.list2cmdline.
+_CMD_UNSAFE: frozenset[str] = frozenset('|"<>&^%')
+
+
+def _sanitize_prompt(text: str) -> str:
+    """Strip only the characters that break Windows CMD .cmd wrapper invocation.
+
+    Used for Claude-written prompts where _sanitize() is too aggressive —
+    stripping brackets, equals, backticks etc. renders code instructions
+    unreadable and causes Gemini to respond with meta-questions instead of edits.
+
+    Args:
+        text: Prompt text from the Claude orchestrator.
+
+    Returns:
+        Prompt safe for Windows CMD passthrough, with code structure intact.
+    """
+    return "".join(c if c not in _CMD_UNSAFE else " " for c in (text or ""))
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
@@ -79,12 +123,11 @@ def _build_task_prompt(task: dict, single_file_mode: bool = False) -> str:
     line_hint = str(task.get("line") or "")
 
     if single_file_mode:
-        # File content arrives via stdin.  Ask for raw output only.
+        # Ask for a JSON diff — Gemini reliably outputs JSON (proven by scanner).
+        # This avoids all write_file/edit_file tool failures: Gemini just describes
+        # the change and Python applies it.
         lines = [
-            "The current file content is provided above via stdin.",
-            "Output the COMPLETE corrected file. Nothing else.",
-            "No explanation. No markdown fences. Raw source code only.",
-            "Your response must start with the first character of the file.",
+            "Source file provided via stdin. Output a change specification as JSON.",
             "",
             f"FILE: {file_hint}",
         ]
@@ -92,15 +135,29 @@ def _build_task_prompt(task: dict, single_file_mode: bool = False) -> str:
             lines += [f"APPROX LINE: {line_hint}"]
         lines += [
             "",
-            f"CHANGE NEEDED ({severity} {category}): {title}",
+            f"TASK: {title}",
+            f"SEVERITY: {severity}  CATEGORY: {category}",
             "",
             description,
+            "",
+            "Output ONLY a JSON object. No prose. No markdown. No tool calls.",
+            'Start with { and end with }.',
+            "",
+            '{"explanation":"...","changes":[{"find":"exact verbatim string from file","replace":"exact verbatim replacement"}]}',
+            "",
+            "Rules:",
+            "- find must be copied EXACTLY from the source file including all whitespace",
+            "- replace is the exact replacement text",
+            "- Make only the minimal change described above",
+            "- Multiple change objects allowed if needed",
         ]
     else:
         # No file pre-loaded — Gemini uses its own file and web tools.
         # google_web_search and web_fetch are available and encouraged when
         # looking up docs, APIs, or best practices relevant to the fix.
-        lines = ["TASK: Make one specific code change.", ""]
+        _tool_default = "TASK: Make one specific code change."
+        _tool_header = _PROMPT_OVERRIDES.get("executor_task_tool", _tool_default)
+        lines = [_tool_header, ""]
         if file_hint:
             lines += [f"FILE: {file_hint}"]
             if line_hint:
@@ -120,8 +177,66 @@ def _build_task_prompt(task: dict, single_file_mode: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _apply_json_diff(file_content: str, raw: str) -> tuple[str, int]:
+    """Parse a JSON diff from Gemini and apply find/replace changes.
+
+    Args:
+        file_content: Original file text.
+        raw: Gemini stdout containing a JSON object with a 'changes' list.
+
+    Returns:
+        (new_content, num_changes_applied).
+        Returns (file_content, 0) if JSON cannot be parsed or no changes match.
+    """
+    data: dict | None = None
+    try:
+        data = json.loads(raw.strip())
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+
+    if not data or "changes" not in data:
+        return file_content, 0
+
+    new_content = file_content
+    applied = 0
+    for change in data.get("changes", []):
+        find = change.get("find", "")
+        replace = change.get("replace", "")
+        if find and find in new_content:
+            new_content = new_content.replace(find, replace, 1)
+            applied += 1
+
+    return new_content, applied
+
+
+def _extract_marked_content(text: str) -> str | None:
+    """Extract content between <<<BEGIN_FILE>>> and <<<END_FILE>>> markers.
+
+    Args:
+        text: Raw stdout from Gemini.
+
+    Returns:
+        Content between markers, or None if markers not found.
+    """
+    start = text.find("<<<BEGIN_FILE>>>")
+    end = text.find("<<<END_FILE>>>")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return text[start + len("<<<BEGIN_FILE>>>"):end].strip("\n")
+
+
 def _strip_fences(text: str) -> str:
-    """Strip markdown code fences if Gemini wrapped its output despite instructions.
+    """Extract source code from Gemini output, handling prose wrappers.
+
+    Tries three strategies in order:
+    1. Entire output is a single code fence — extract it.
+    2. Output contains one or more code fences — use the largest one.
+    3. No fences — return stripped text as-is.
 
     Args:
         text: Raw stdout from Gemini.
@@ -130,19 +245,28 @@ def _strip_fences(text: str) -> str:
         File content with fences removed, or the original text unchanged.
     """
     text = text.strip()
+    if not text:
+        return text
+    # Strategy 1: whole output is a code fence
     m = re.match(r"^```(?:\w+)?\n(.*?)\n```\s*$", text, re.DOTALL)
-    return m.group(1) if m else text
+    if m:
+        return m.group(1)
+    # Strategy 2: find largest code fence anywhere in the output
+    matches = list(re.finditer(r"```(?:\w+)?\n(.*?)\n```", text, re.DOTALL))
+    if matches:
+        return max(matches, key=lambda x: len(x.group(1))).group(1)
+    # Strategy 3: no fences — return as-is
+    return text
 
 
 # ---------------------------------------------------------------------------
 # Gemini CLI caller — single-API-call mode + tool-call fallback
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL: str = "gemini-2.5-pro"
+_DEFAULT_MODEL: str = "gemini-2.5-flash"
 _FLOOR_MODEL: str = "gemini-2.5-flash"
 
 _MODEL_TIMEOUTS: dict[str, int] = {
-    "gemini-2.5-pro": 20,
     "gemini-2.5-flash": 300,
 }
 
@@ -234,33 +358,64 @@ def _run_tool_mode(
     prompt: str,
     cwd: Path,
     timeout: int,
+    console: Console,
     system_md_path: Optional[Path] = None,
 ) -> tuple[int, str]:
-    """Run Gemini in tool mode (no stdin), streaming all output to terminal.
+    """Run Gemini in interactive mode with prompt piped via stdin.
 
-    Fallback for tasks without a known target file.
-
-    Args:
-        system_md_path: Absolute path to GEMINI.md; injected as
-            GEMINI_SYSTEM_MD so Gemini loads the system prompt without
-            requiring the file to be present inside the worktree.
+    Interactive mode (no -p flag) gives Gemini its full tool set including
+    write_file. The -p flag restricts tools to read-only operations, which is
+    why file edits never worked. Sending the prompt via stdin and closing stdin
+    (EOF) causes Gemini to process one turn and exit cleanly.
 
     Returns:
-        (returncode, "").  returncode -1 means timeout.
+        (returncode, stdout).  returncode -1 means timeout.
     """
     env = os.environ.copy()
     if system_md_path is not None and system_md_path.exists():
         env["GEMINI_SYSTEM_MD"] = str(system_md_path)
 
     try:
-        result = subprocess.run(
-            [gemini_path, "--model", model, "-p", prompt, "--yolo"],
+        proc = subprocess.Popen(
+            [gemini_path, "--model", model, "--yolo"],
             cwd=str(cwd),
-            timeout=timeout,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
             env=env,
         )
-        return result.returncode, ""
+
+        stdout_lines: list[str] = []
+
+        def _read_stdout() -> None:
+            assert proc.stdout is not None
+            for ln in proc.stdout:
+                stdout_lines.append(ln)
+
+        t = threading.Thread(target=_read_stdout, daemon=True)
+        t.start()
+
+        assert proc.stderr is not None
+        # Send prompt then close stdin (EOF signals end of session)
+        assert proc.stdin is not None
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+
+        for line in proc.stderr:
+            stripped = line.rstrip()
+            if stripped:
+                console.print(f"    {stripped}")
+
+        proc.wait(timeout=timeout)
+        t.join(timeout=5)
+        return proc.returncode, "".join(stdout_lines)
+
     except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
         return -1, ""
     except Exception:
         return -2, ""
@@ -270,9 +425,8 @@ def _call_gemini(
     prompt: str,
     cwd: Path,
     console: Console,
-    file_content: Optional[str] = None,
     system_md_path: Optional[Path] = None,
-) -> tuple[bool, str, Optional[str]]:
+) -> tuple[bool, str, Optional[str], str]:
     """Invoke Gemini CLI, using single-API-call mode when file content is supplied.
 
     Single-file mode (file_content provided):
@@ -293,11 +447,11 @@ def _call_gemini(
             instead of looking for the file inside the worktree.
 
     Returns:
-        (success, corrected_content_or_empty, error_message).
+        (success, corrected_content_or_empty, error_message, model_used).
     """
     gemini_path = shutil.which("gemini")
     if gemini_path is None:
-        return False, "", "Gemini CLI not found - ensure 'gemini' is on PATH"
+        return False, "", "Gemini CLI not found - ensure 'gemini' is on PATH", ""
 
     env_model = os.environ.get("GRINDBOT_MODEL", "").strip()
     models = [env_model] if env_model else [_DEFAULT_MODEL, _FLOOR_MODEL]
@@ -306,22 +460,15 @@ def _call_gemini(
         if i > 0:
             console.print(f"    [yellow][!] Falling back to {model}...[/yellow]")
 
-        mode_label = "single-file" if file_content is not None else "tool"
-        console.print(f"    [dim]Model: {model}  ({mode_label} mode)[/dim]")
+        console.print(f"    [dim]Model: {model}  (interactive mode)[/dim]")
         console.print("    [dim]" + "-" * 56 + "[/dim]")
 
         timeout = _MODEL_TIMEOUTS.get(model, 300)
 
-        if file_content is not None:
-            rc, stdout = _run_single_file(
-                gemini_path, model, prompt, cwd, file_content, timeout, console,
-                system_md_path=system_md_path,
-            )
-        else:
-            rc, stdout = _run_tool_mode(
-                gemini_path, model, prompt, cwd, timeout,
-                system_md_path=system_md_path,
-            )
+        rc, stdout = _run_tool_mode(
+            gemini_path, model, prompt, cwd, timeout, console,
+            system_md_path=system_md_path,
+        )
 
         console.print("    [dim]" + "-" * 56 + "[/dim]")
 
@@ -332,10 +479,10 @@ def _call_gemini(
                     f"trying next model...[/yellow]"
                 )
                 continue
-            return False, "", f"Gemini CLI timed out after {timeout}s"
+            return False, "", f"Gemini CLI timed out after {timeout}s", model
 
         if rc == 0:
-            return True, stdout, None
+            return True, stdout, None, model
 
         if i < len(models) - 1:
             console.print(
@@ -343,9 +490,9 @@ def _call_gemini(
             )
             continue
 
-        return False, "", f"Gemini CLI exited with code {rc}"
+        return False, "", f"Gemini CLI exited with code {rc}", model
 
-    return False, "", "All models failed"
+    return False, "", "All models failed", ""
 
 
 # ---------------------------------------------------------------------------
@@ -429,44 +576,40 @@ def execute_task(
         else:
             console.print("    [dim]GEMINI.md not found; running without system prompt.[/dim]")
 
-        # ---- c. Call Gemini CLI --------------------------------------------
-        # Single-file mode: read the target file ourselves and pipe it in.
-        # Gemini outputs the corrected version in one API call; we write it back.
-        # Falls back to tool mode if the task has no specific file or it's missing.
+        # ---- c. Claude orchestrates, Gemini executes -----------------------
+        # Claude writes a precise task prompt. Gemini runs it in interactive
+        # mode (no -p flag) which gives it full tool access including write_file.
         file_hint = task.get("file") or ""
-        file_content: Optional[str] = None
+        file_preview: Optional[str] = None
+        target_file: Optional[Path] = None
         if file_hint:
-            target = worktree_path / file_hint
-            if target.exists():
+            target_file = worktree_path / file_hint
+            if target_file.exists():
                 try:
-                    file_content = target.read_text(encoding="utf-8")
+                    file_preview = target_file.read_text(encoding="utf-8")
                 except OSError:
-                    file_content = None
+                    pass
 
-        single_file = file_content is not None
-        console.print(
-            f"    [dim]Calling Gemini CLI "
-            f"({'single-file' if single_file else 'tool'} mode)...[/dim]"
-        )
-        prompt = _build_task_prompt(task, single_file_mode=single_file)
-        gem_ok, gem_out, gem_err = _call_gemini(
+        console.print("    [dim]Claude orchestrating task...[/dim]")
+        orchestrated = brain.orchestrate_task(task, file_content=file_preview)
+        if orchestrated:
+            prompt = _sanitize_prompt(orchestrated)
+            task["prompt_type"] = "orchestrated"
+            console.print("    [dim]Using Claude-written prompt.[/dim]")
+        else:
+            prompt = _build_task_prompt(task, single_file_mode=False)
+            task["prompt_type"] = "static"
+            console.print("    [dim]Using static prompt (brain unavailable).[/dim]")
+
+        gem_ok, _, gem_err, gem_model = _call_gemini(
             prompt, worktree_path, console,
-            file_content=file_content,
             system_md_path=system_md_path,
         )
-
         if not gem_ok:
             console.print(f"    [red]!! Gemini CLI failed:[/red] {gem_err}")
             task["status"] = "failed"
             task["error"] = gem_err
             return task
-
-        # In single-file mode write Gemini's output back to the target file.
-        if single_file and gem_out.strip():
-            corrected = _strip_fences(gem_out)
-            target = worktree_path / file_hint
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(corrected, encoding="utf-8")
 
         # ---- d. Show which files changed -----------------------------------
         changed_preview = wt.get_changed_files(worktree_path)
@@ -475,11 +618,49 @@ def execute_task(
             for f in changed_preview:
                 console.print(f"      [green]{f}[/green]")
         else:
-            console.print("    [dim]No file changes detected yet.[/dim]")
+            console.print("    [dim]No file changes detected.[/dim]")
+
+            # ---- d2. Retry: Claude writes a precise find/replace prompt ----
+            if file_preview is not None:
+                console.print("    [dim]Generating precise retry prompt (Claude)...[/dim]")
+                retry_prompt = brain.orchestrate_retry(task, file_preview)
+                if retry_prompt:
+                    retry_prompt = _sanitize_prompt(retry_prompt)
+                    console.print("    [dim]Retrying Gemini with precise prompt...[/dim]")
+                    retry_ok, _, retry_err, retry_model = _call_gemini(
+                        retry_prompt, worktree_path, console,
+                        system_md_path=system_md_path,
+                    )
+                    if not retry_ok:
+                        console.print(f"    [red]!! Gemini retry failed:[/red] {retry_err}")
+                        task["status"] = "failed"
+                        task["error"] = f"Gemini retry failed: {retry_err}"
+                        return task
+                    # Check again for changes after retry
+                    changed_preview = wt.get_changed_files(worktree_path)
+                    if changed_preview:
+                        console.print(f"    [dim]Retry succeeded: {len(changed_preview)} file(s) changed.[/dim]")
+                    else:
+                        # Still no changes after retry — fail the task
+                        task["status"] = "failed"
+                        task["error"] = "No files were changed after Gemini retry"
+                        return task
+                else:
+                    task["status"] = "failed"
+                    task["error"] = "No files were changed - Gemini CLI may not have made any edits"
+                    return task
+            else:
+                # No target file known — cannot generate precise retry prompt
+                task["status"] = "failed"
+                task["error"] = "No files were changed - Gemini CLI may not have made any edits"
+                return task
 
         # ---- e. Validate ---------------------------------------------------
         console.print("    [dim]Validating changes...[/dim]")
         result = validate_changes(worktree_path, task)
+
+        task["validation_warnings"] = result.warnings
+        task["changed_files"] = result.changed_files
 
         if result.warnings:
             for w in result.warnings:
@@ -491,12 +672,14 @@ def execute_task(
             task["error"] = result.error
             return task
 
-        # ---- e. Commit -----------------------------------------------------
+        # ---- f. Commit -----------------------------------------------------
+        worker = gem_model if gem_model else "gemini"
         commit_msg = (
-            f"grindbot: {title}\n\n"
+            f"[{worker}] {title}\n\n"
             f"Task-ID: {task_id}\n"
             f"Severity: {task.get('severity', 'medium')}\n"
-            f"Category: {task.get('category', 'improvement')}\n\n"
+            f"Category: {task.get('category', 'improvement')}\n"
+            f"Orchestrated-by: claude-opus-4-6\n\n"
             f"{task.get('description', '')[:500]}"
         )
         commit_ok, commit_err = wt.commit_worktree(worktree_path, commit_msg)
@@ -508,48 +691,61 @@ def execute_task(
             return task
 
         console.print(
-            f"    [green]OK Completed[/green] -> branch [cyan]{branch_name}[/cyan] "
+            f"    [green]Committed[/green] -> branch [cyan]{branch_name}[/cyan] "
             f"({len(result.changed_files)} file(s) changed)"
         )
-        task["status"] = "completed"
         task["branch"] = branch_name
-        task["error"] = None
-        # --- (j) Claude merge review -----------------------------------------
-        console.print("    [dim]Requesting Claude merge review...[/dim]")
-        # Placeholder for Claude review - assuming a function like this exists
-        # and returns True for approval, False for rejection.
-        # In a full codebase, this would involve actual API calls or logic.
-        try:
-            # Assuming a placeholder function _request_claude_review exists
-            claude_approved = _request_claude_review(worktree_path, branch_name, console)
-        except NameError:
-            # If _request_claude_review is not defined, assume approval for now
-            # In a real scenario, this should be handled by scanner/planner
-            console.print("    [yellow]!! _request_claude_review not found. Assuming approval.[/yellow]")
-            claude_approved = True
 
-        if claude_approved:
-            console.print("    [green]Claude approved merge. Pushing branch...[/green]")
-            # NEW LOCATION FOR PUSH BRANCH (was previously at (i))
-            push_ok, push_err = wt.push_branch(worktree_path, branch_name)
-            if not push_ok:
-                console.print(f"    [red]!! Push after Claude approval failed:[/red] {push_err}")
-                task["status"] = "failed"
-                task["error"] = f"Push after Claude approval failed: {push_err}"
-                return task
-        else:
-            console.print("    [yellow]Claude rejected merge. Reverting local commit.[/yellow]")
-            wt.revert_last_commit(worktree_path) # Keep local revert
-            task["status"] = "rejected"
-            task["error"] = "Claude review rejected changes."
+        # ---- g. Cleanup worktree (keep branch for merge) -------------------
+        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
+
+        # ---- h. Merge into main --------------------------------------------
+        console.print(f"    [dim]Merging {branch_name} into main...[/dim]")
+        merge_ok, merge_err = wt.merge_branch(repo_root, branch_name)
+        if not merge_ok:
+            console.print(f"    [red]!! Merge failed:[/red] {merge_err}")
+            task["status"] = "failed"
+            task["error"] = f"Merge failed: {merge_err}"
+            wt._delete_branch(repo_root, branch_name)
             return task
+
+        # ---- i. Claude post-merge review (before push) ---------------------
+        console.print("    [dim]Claude reviewing merge...[/dim]")
+        head_diff = wt.get_head_diff(repo_root)
+        merge_approved, merge_reason = brain.review_merge(head_diff)
+
+        task["merge_reason"] = merge_reason
+
+        if merge_approved:
+            console.print(f"    [green]Claude approved merge:[/green] {merge_reason}")
+            task["status"] = "completed"
+            task["error"] = None
+            # ---- j. Push only after Claude approval ------------------------
+            default_branch = wt.get_default_branch(repo_root)
+            push_ok, push_err = wt.push_branch(repo_root, default_branch)
+            if not push_ok:
+                console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
+                task["push_error"] = push_err
+            else:
+                console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+        else:
+            console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
+            console.print("    [dim]Reverting...[/dim]")
+            revert_ok, revert_err = wt.revert_last_commit(repo_root)
+            if revert_ok:
+                console.print("    [yellow]Reverted. Main branch restored.[/yellow]")
+            else:
+                console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
+            task["status"] = "failed"
+            task["error"] = f"Claude rejected merge: {merge_reason}"
+            wt._delete_branch(repo_root, branch_name)
 
         return task
 
     finally:
-        # ---- f. Always clean up the worktree directory ---------------------
-        keep = task.get("status") == "completed"
-        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=keep)
+        # Safety net — cleanup worktree if still present (crash/early return)
+        if worktree_path.exists():
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=False)
 
 
 # ---------------------------------------------------------------------------
@@ -588,10 +784,10 @@ def run_grind(
         )
         return []
 
-    pending = [t for t in all_tasks if t.get("status") == "pending"]
+    pending = [t for t in all_tasks if t.get("status") in ("pending", "failed")]
     if not pending:
         console.print(
-            "[yellow]No pending tasks - everything is already completed or failed.[/yellow]"
+            "[yellow]No pending or failed tasks — everything is completed.[/yellow]"
         )
         return all_tasks
 
@@ -665,4 +861,131 @@ def run_grind(
 
     elapsed = time.monotonic() - start
     console.print(f"\n[dim]Finished in {elapsed:.1f}s[/dim]")
+    return all_tasks
+
+
+# ---------------------------------------------------------------------------
+# Retry
+# ---------------------------------------------------------------------------
+
+
+def retry_tasks(
+    task_ids: list[str],
+    grindbot_dir: Path,
+    console: Console,
+) -> list[dict]:
+    """Reset specific tasks to pending and re-execute them.
+
+    Steps:
+      1. Load all tasks from tasks.json.
+      2. For each requested ID: validate it exists and is retryable, then
+         reset status to "pending" and clear branch/error fields.
+      3. Save tasks.json so the reset is durable before any execution starts.
+      4. Locate the git repo root.
+      5. Run execute_task for each reset task, saving after every one.
+
+    Args:
+        task_ids: Zero-padded task ID strings to retry, e.g. ["003", "007"].
+            Callers are responsible for normalising IDs before calling this.
+        grindbot_dir: Absolute path to the project's .grindbot/ directory.
+        console: Rich console for all output.
+
+    Returns:
+        Full updated list of all tasks after execution.
+    """
+    from .config import find_repo_root, load_tasks, save_tasks
+
+    all_tasks = load_tasks(grindbot_dir.parent)
+    if not all_tasks:
+        console.print("[yellow]No tasks found in tasks.json.[/yellow]")
+        return []
+
+    # --- Validate and reset requested tasks ---------------------------------
+    # Index by id for O(1) lookup.
+    task_index: dict[str, int] = {t["id"]: i for i, t in enumerate(all_tasks)}
+    to_run: list[dict] = []
+
+    for tid in task_ids:
+        if tid not in task_index:
+            console.print(f"[yellow][!] Task {tid} not found — skipped.[/yellow]")
+            continue
+
+        task = all_tasks[task_index[tid]]
+        current_status = task.get("status", "pending")
+
+        if current_status == "pending":
+            console.print(
+                f"[yellow][!] Task {tid} is already pending — skipped.[/yellow]"
+            )
+            continue
+
+        if current_status not in ("failed", "completed"):
+            console.print(
+                f"[yellow][!] Task {tid} has unexpected status "
+                f"'{current_status}' — skipped.[/yellow]"
+            )
+            continue
+
+        task["status"] = "pending"
+        task["branch"] = None
+        task["error"] = None
+        all_tasks[task_index[tid]] = task
+        to_run.append(task)
+        console.print(
+            f"  [dim]Reset task {tid} ({current_status} -> pending):[/dim] "
+            f"{task.get('title', '')}"
+        )
+
+    if not to_run:
+        console.print("[yellow]No tasks eligible for retry.[/yellow]")
+        return all_tasks
+
+    # Persist the resets before executing so a crash doesn't leave stale state.
+    try:
+        save_tasks(grindbot_dir.parent, all_tasks)
+    except Exception as exc:
+        console.print(f"[red]!! Could not save tasks.json before retry: {exc}[/red]")
+        return all_tasks
+
+    # --- Locate repo root ---------------------------------------------------
+    repo_root = find_repo_root(grindbot_dir)
+    if repo_root is None:
+        console.print(
+            "[red]Cannot locate the git repository root. "
+            "Is the project inside a git repo?[/red]"
+        )
+        return all_tasks
+
+    console.print(
+        Panel(
+            f"[bold]GrindBot retry[/bold] - re-running [cyan]{len(to_run)}[/cyan] "
+            f"task(s) in {repo_root}",
+            border_style="cyan",
+        )
+    )
+
+    start = time.monotonic()
+
+    # --- Execute each reset task --------------------------------------------
+    for task in to_run:
+        try:
+            updated = execute_task(task, repo_root, grindbot_dir, console)
+        except Exception as exc:
+            console.print(f"    [red]!! Unhandled exception:[/red] {exc}")
+            task["status"] = "failed"
+            task["error"] = f"Unhandled exception: {exc}"
+            updated = task
+
+        for i, t in enumerate(all_tasks):
+            if t["id"] == updated["id"]:
+                all_tasks[i] = updated
+                break
+
+        try:
+            save_tasks(grindbot_dir.parent, all_tasks)
+        except Exception as exc:
+            console.print(f"  [yellow][!] Could not save tasks.json:[/yellow] {exc}")
+
+    elapsed = time.monotonic() - start
+    console.print(f"\n[dim]Retry finished in {elapsed:.1f}s[/dim]")
     return all_tasks

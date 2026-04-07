@@ -25,8 +25,12 @@ from rich.console import Console
 console = Console()
 
 # Override with env var GRINDBOT_MODEL when the default has no capacity.
-_DEFAULT_MODEL = "gemini-2.5-pro"
+_DEFAULT_MODEL = "gemini-2.5-flash"
 _FLOOR_MODEL = "gemini-2.5-flash"
+
+_MODEL_TIMEOUTS: dict[str, int] = {
+    "gemini-2.5-flash": 180,
+}
 
 # Directory names to skip when collecting source files.
 _SKIP_DIRS: frozenset[str] = frozenset({
@@ -34,6 +38,28 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     ".venv", "venv", "env", ".env", "dist", "build", ".tox",
     ".mypy_cache", ".pytest_cache", ".ruff_cache",
 })
+
+# Source file extensions to collect across all supported languages.
+_SOURCE_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
+    ".kt", ".scala", ".r", ".m", ".sh", ".bash", ".zsh", ".ps1",
+    ".lua", ".dart", ".ex", ".exs", ".ml", ".hs", ".clj",
+})
+
+# Maps file extension to human-readable language name for display.
+_EXT_TO_LANG: dict[str, str] = {
+    ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+    ".jsx": "JavaScript", ".tsx": "TypeScript", ".go": "Go",
+    ".rs": "Rust", ".java": "Java", ".c": "C", ".cpp": "C++",
+    ".h": "C/C++", ".hpp": "C++", ".cs": "C#", ".rb": "Ruby",
+    ".php": "PHP", ".swift": "Swift", ".kt": "Kotlin",
+    ".scala": "Scala", ".r": "R", ".m": "Objective-C",
+    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
+    ".ps1": "PowerShell", ".lua": "Lua", ".dart": "Dart",
+    ".ex": "Elixir", ".exs": "Elixir", ".ml": "OCaml",
+    ".hs": "Haskell", ".clj": "Clojure",
+}
 
 # Prompt sent via -p.  Must be short (well under 8 191 chars) and free of
 # the Windows CMD special chars  |  "  <  >  &  ^  {  }.
@@ -46,6 +72,7 @@ _SCAN_PROMPT = (
     "The complete source code is provided above via stdin. "
     "Do not read any files or use any tools. "
     "Analyze only the code provided. "
+    "The codebase may contain multiple programming languages — analyze all of them. "
     "Find real, specific, actionable code issues. "
     "Output a raw JSON array only. "
     "Your entire response must start with [ and end with ]. "
@@ -64,30 +91,92 @@ _SCAN_PROMPT = (
 # Hard cap on piped content to avoid exceeding model context limits.
 _MAX_STDIN_BYTES = 200_000
 
+# ---------------------------------------------------------------------------
+# Prompt override injection (filled by cli.py before each grind run)
+# ---------------------------------------------------------------------------
+
+_PROMPT_OVERRIDES: dict = {}
+
+
+def load_prompt_overrides(store: dict) -> None:
+    """Inject evolved prompts from the prompt store into this module.
+
+    Called by cli.py after loading .grindbot/prompts.json, before grind starts.
+
+    Args:
+        store: Full prompt store dict as returned by config.load_prompt_store().
+    """
+    global _PROMPT_OVERRIDES
+    _PROMPT_OVERRIDES = store.get("prompts", {})
+
+
+def _get_scan_prompt() -> str:
+    """Return evolved scan prompt if available, else the hardcoded default."""
+    return _PROMPT_OVERRIDES.get("scanner_scan", _SCAN_PROMPT)
+
+
+def _detect_languages(project_path: Path) -> tuple[list[str], int]:
+    """Detect programming languages present in a project.
+
+    Walks the project tree applying the same skip logic as _collect_source_files
+    and returns the distinct language names found plus the total file count.
+
+    Args:
+        project_path: Resolved absolute path to the project root.
+
+    Returns:
+        Tuple of (sorted list of language names, total source file count).
+    """
+    seen_langs: set[str] = set()
+    total = 0
+
+    for f in project_path.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            rel = f.relative_to(project_path)
+        except ValueError:
+            continue
+        if any(
+            part.startswith(".") or part in _SKIP_DIRS or part.endswith(".egg-info")
+            for part in rel.parts[:-1]
+        ):
+            continue
+        lang = _EXT_TO_LANG.get(f.suffix.lower())
+        if lang:
+            seen_langs.add(lang)
+            total += 1
+
+    return sorted(seen_langs), total
+
 
 def _collect_source_files(project_path: Path) -> str:
-    """Read Python source files and return them as a single labelled string.
+    """Read source files and return them as a single labelled string.
 
-    Skips hidden directories, build artefacts, virtual environments, and
-    other non-source trees listed in _SKIP_DIRS.  Prints each file to the
-    console as it is collected so the user can see progress.
+    Collects all files whose extension is in _SOURCE_EXTENSIONS, skipping
+    hidden directories, build artefacts, virtual environments, and other
+    non-source trees listed in _SKIP_DIRS.  Prints each file to the console
+    as it is collected so the user can see progress.
 
     Args:
         project_path: Resolved absolute path to the project root.
 
     Returns:
         Multi-section string with each file prefixed by a === path === header.
-        Returns an empty string if no Python files are found.
+        Returns an empty string if no matching source files are found.
     """
     parts: list[str] = []
     total_bytes = 0
     skipped = 0
 
-    all_py = sorted(project_path.rglob("*.py"))
-    total_py = len(all_py)
+    all_files = sorted(
+        f for f in project_path.rglob("*")
+        if f.is_file() and f.suffix.lower() in _SOURCE_EXTENSIONS
+    )
+    total_files = len(all_files)
 
-    for idx, py_file in enumerate(all_py, start=1):
-        rel = py_file.relative_to(project_path)
+    for idx, src_file in enumerate(all_files, start=1):
+        rel = src_file.relative_to(project_path)
 
         # Skip any path that passes through a disallowed directory name.
         if any(
@@ -98,7 +187,7 @@ def _collect_source_files(project_path: Path) -> str:
             continue
 
         try:
-            content = py_file.read_text(encoding="utf-8", errors="replace")
+            content = src_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             skipped += 1
             continue
@@ -116,7 +205,7 @@ def _collect_source_files(project_path: Path) -> str:
         # Show each file as it's collected: [idx/total]  path  (N lines)
         line_count = content.count("\n")
         console.print(
-            f"  [dim][{idx}/{total_py}][/dim]  [cyan]{rel.as_posix()}[/cyan]"
+            f"  [dim][{idx}/{total_files}][/dim]  [cyan]{rel.as_posix()}[/cyan]"
             f"  [dim]{line_count} lines[/dim]"
         )
         parts.append(chunk)
@@ -239,14 +328,29 @@ def scan_project(project_path: str | Path) -> list[dict[str, Any]]:
     env_model = os.environ.get("GRINDBOT_MODEL", "").strip()
     models = [env_model] if env_model else [_DEFAULT_MODEL, _FLOOR_MODEL]
 
-    # Collect source files on the Python side — no file-tool calls needed.
+    # Detect languages and collect source files on the Python side — no file-tool calls needed.
+    langs, lang_file_count = _detect_languages(project_path)
+    if langs:
+        console.print(
+            f"[dim]Detected languages: {', '.join(langs)} ({lang_file_count} file(s))[/dim]"
+        )
     console.print("[dim]Collecting source files...[/dim]")
     source_context = _collect_source_files(project_path)
     if not source_context.strip():
-        raise RuntimeError(f"No Python source files found in {project_path}")
+        raise RuntimeError(f"No source files found in {project_path}")
 
     file_count = source_context.count("\n=== ")
-    console.print(f"[dim]Sending {file_count} file(s) to Gemini...[/dim]")
+
+    # Prepend GEMINI.md scan intelligence so Gemini reads the product context
+    # and task-quality guide before seeing any source files.
+    gemini_md = Path(__file__).parent.parent / "GEMINI.md"
+    if gemini_md.exists():
+        scan_preamble = gemini_md.read_text(encoding="utf-8", errors="replace")
+        stdin_payload = scan_preamble + "\n\n" + source_context
+        console.print(f"[dim]Sending GEMINI.md + {file_count} file(s) to Gemini...[/dim]")
+    else:
+        stdin_payload = source_context
+        console.print(f"[dim]Sending {file_count} file(s) to Gemini...[/dim]")
 
     # -p carries the short instruction; file content arrives via stdin.
     # Windows note: subprocess input= (pipe) does not work with .CMD wrappers;
@@ -257,14 +361,14 @@ def scan_project(project_path: str | Path) -> list[dict[str, Any]]:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, encoding="utf-8"
         ) as tmp:
-            tmp.write(source_context)
+            tmp.write(stdin_payload)
             tmp_path = tmp.name
 
         for i, model in enumerate(models):
             if i > 0:
                 console.print(f"[yellow][!] Falling back to {model}...[/yellow]")
 
-            cmd = [gemini_bin, "--model", model, "-p", _SCAN_PROMPT, "--yolo"]
+            cmd = [gemini_bin, "--model", model, "-p", _get_scan_prompt(), "--yolo"]
             console.print(
                 f"\n[bold cyan]Calling Gemini CLI ({model})...[/bold cyan]"
                 f"  [dim]streaming output below[/dim]"
@@ -306,7 +410,8 @@ def scan_project(project_path: str | Path) -> list[dict[str, Any]]:
                     if stripped:
                         console.print(f"  {stripped}")
 
-                proc.wait(timeout=120)
+                scan_timeout = _MODEL_TIMEOUTS.get(model, 180)
+                proc.wait(timeout=scan_timeout)
                 t.join(timeout=5)
                 raw_stdout = "".join(stdout_lines)
 
@@ -315,7 +420,11 @@ def scan_project(project_path: str | Path) -> list[dict[str, Any]]:
                     proc.kill()
                 except Exception:
                     pass
-                raise RuntimeError("Gemini CLI timed out after 120 seconds.")
+                if i < len(models) - 1:
+                    console.print(f"[yellow][!] {model} timed out after {_MODEL_TIMEOUTS.get(model, 180)}s, trying next model...[/yellow]")
+                    console.print("[dim]" + "-" * 60 + "[/dim]")
+                    continue
+                raise RuntimeError(f"Gemini CLI timed out after {_MODEL_TIMEOUTS.get(model, 180)} seconds.")
 
             console.print("[dim]" + "-" * 60 + "[/dim]")
 
