@@ -50,7 +50,7 @@ def scan(path: str, goal: str) -> None:
     """Analyze a codebase with Claude Opus 4.6 and generate a prioritized task list."""
     from pathlib import Path as _Path
     from . import brain, config, planner, reporter
-    from .scanner import _collect_source_files, _detect_languages
+    from .scanner import collect_source_files, _detect_languages
 
     if not brain._get_api_key():
         console.print(
@@ -74,7 +74,7 @@ def scan(path: str, goal: str) -> None:
             f"[dim]Detected languages: {', '.join(langs)} ({lang_file_count} file(s))[/dim]"
         )
     console.print("[dim]Collecting source files...[/dim]")
-    source_context = _collect_source_files(project_path)
+    source_context = collect_source_files(project_path)
     if not source_context.strip():
         console.print("[red]No source files found.[/red]")
         sys.exit(1)
@@ -87,11 +87,18 @@ def scan(path: str, goal: str) -> None:
             + source_context
         )
 
+    brain.reset_task_credits()
     try:
         raw_tasks = brain.plan_tasks(source_context, goal=goal)
     except RuntimeError as exc:
         console.print(f"[red]Scan failed: {exc}[/red]")
         sys.exit(1)
+
+    scan_credits = brain.get_task_credits()
+    scan_usd = scan_credits * config.CREDIT_COST_USD
+    console.print(
+        f"  [bold green]Scan cost: {scan_credits:.2f} credits → ${scan_usd:.4f}[/bold green]"
+    )
 
     if not raw_tasks:
         console.print("[yellow]Claude returned no actionable tasks.[/yellow]")
@@ -133,7 +140,14 @@ def scan(path: str, goal: str) -> None:
     default=False,
     help="Skip prompt optimization (reflection loop) after grind.",
 )
-def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool) -> None:
+@click.option(
+    "--workers",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of tasks to run in parallel.",
+)
+def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int) -> None:
     """Execute pending tasks autonomously, each in its own git worktree."""
     from . import brain, config, reporter, scanner
     from . import executor
@@ -166,7 +180,7 @@ def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool) -> None:
     scanner.load_prompt_overrides(store)
     executor.load_prompt_overrides(store)
 
-    tasks = run_grind(grindbot_dir, console, limit=limit, dry_run=dry_run)
+    tasks = run_grind(grindbot_dir, console, limit=limit, dry_run=dry_run, workers=workers)
     if not dry_run:
         reporter.show_grind_report(tasks, str(grindbot_dir.parent))
 
@@ -331,3 +345,103 @@ def report(path: str) -> None:
 
     tasks = config.load_tasks(path)
     reporter.show_grind_report(tasks, path)
+
+
+# ---------------------------------------------------------------------------
+# daemon
+# ---------------------------------------------------------------------------
+
+
+@main.command("daemon")
+@click.option(
+    "--path",
+    "path",
+    default=".",
+    show_default=True,
+    type=click.Path(exists=True),
+    help="Project root.",
+)
+@click.option(
+    "--workers",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Parallel task workers per cycle.",
+)
+@click.option(
+    "--interval",
+    type=int,
+    default=3600,
+    show_default=True,
+    help="Seconds between grind cycles.",
+)
+@click.option(
+    "--budget",
+    type=float,
+    default=None,
+    help="Stop after spending this many USD (cumulative).",
+)
+def daemon(path: str, workers: int, interval: int, budget: float) -> None:
+    """Run grind → reflect → rescan in a continuous loop."""
+    import time
+    from rich.panel import Panel
+    from . import config, executor, planner, reflector, scanner
+    from .brain import plan_tasks
+
+    project_path = Path(path).resolve()
+    grindbot_dir = config.find_grindbot_dir(project_path)
+    if grindbot_dir is None:
+        console.print(
+            "[red]No .grindbot/ directory found.[/red] "
+            "Run [bold]grindbot init <path>[/bold] first."
+        )
+        sys.exit(1)
+
+    total_usd = 0.0
+    cycle = 0
+
+    console.print(Panel(
+        f"[bold green]Daemon started[/bold green]  workers={workers}  interval={interval}s"
+        + (f"  budget=${budget:.2f}" if budget else "  no budget cap"),
+        title="GrindBot Daemon",
+    ))
+
+    try:
+        while True:
+            cycle += 1
+            console.rule(f"[bold]Cycle {cycle}[/bold]")
+
+            # 1. Grind pending tasks
+            tasks = executor.run_grind(grindbot_dir, console, workers=workers)
+
+            # 2. Prompt RL reflection
+            reflector.run_reflection(grindbot_dir, tasks, console)
+
+            # 3. Budget check (use credits recorded on tasks)
+            cycle_credits = sum(t.get("credits", 0.0) for t in tasks)
+            cycle_usd = cycle_credits * config.CREDIT_COST_USD
+            total_usd += cycle_usd
+            console.print(f"  [dim]Cycle cost: ${cycle_usd:.4f}  Total: ${total_usd:.4f}[/dim]")
+            if budget and total_usd >= budget:
+                console.print(f"[yellow]Budget ${budget:.2f} reached — daemon stopping.[/yellow]")
+                break
+
+            # 4. Re-scan for new tasks
+            console.print("  [dim]Re-scanning codebase for new issues...[/dim]")
+            source_context = scanner.collect_source_files(project_path)
+            raw_new = plan_tasks(source_context)
+            all_tasks = config.load_tasks(project_path)
+            merged = planner.merge_new_tasks(all_tasks, raw_new)
+            new_count = len(merged) - len(all_tasks)
+            config.save_tasks(project_path, merged)
+            if new_count:
+                console.print(f"  [green]+{new_count} new task(s) queued.[/green]")
+            else:
+                console.print("  [dim]No new tasks found.[/dim]")
+
+            # 5. Sleep
+            console.print(f"  [dim]Next cycle in {interval}s — Ctrl+C to stop.[/dim]")
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Daemon stopped.[/yellow]")
