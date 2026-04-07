@@ -768,6 +768,28 @@ def execute_task(
             wt._delete_branch(repo_root, branch_name)
             return task
 
+        # Sync local default branch after a successful merge
+        default_branch = wt.get_default_branch(repo_root)
+        console.print(f"    [dim]Syncing local {default_branch} branch...[/dim]")
+        try:
+            subprocess.run(
+                ["git", "pull", "origin", default_branch],
+                cwd=str(repo_root),
+                capture_output=True,
+                timeout=60,
+                check=True,  # Raise CalledProcessError for non-zero exit codes
+            )
+            console.print(f"    [green]Local {default_branch} branch synced.[/green]")
+        except subprocess.CalledProcessError as e:
+            console.print(f"    [yellow][!] Git pull failed for {default_branch}:[/yellow] {e.stderr.decode().strip()}")
+            task["pull_error"] = e.stderr.decode().strip()
+        except subprocess.TimeoutExpired as e:
+            console.print(f"    [yellow][!] Git pull timed out for {default_branch}.[/yellow]")
+            task["pull_error"] = "Git pull timed out."
+        except Exception as e:
+            console.print(f"    [yellow][!] An unexpected error occurred during git pull:[/yellow] {e}")
+            task["pull_error"] = str(e)
+
         # ---- i. Claude post-merge review (before push) ---------------------
         console.print("    [dim]Claude reviewing merge...[/dim]")
         head_diff = wt.get_head_diff(repo_root)
@@ -780,7 +802,6 @@ def execute_task(
             task["status"] = "completed"
             task["error"] = None
             # ---- j. Push only after Claude approval ------------------------
-            default_branch = wt.get_default_branch(repo_root)
             push_ok, push_err = wt.push_branch(repo_root, default_branch)
             if not push_ok:
                 console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
