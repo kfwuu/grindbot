@@ -758,15 +758,35 @@ def execute_task(
         # ---- g. Cleanup worktree (keep branch for merge) -------------------
         wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
 
-        # ---- h. Merge into main --------------------------------------------
-        console.print(f"    [dim]Merging {branch_name} into main...[/dim]")
-        merge_ok, merge_err = wt.merge_branch(repo_root, branch_name)
-        if not merge_ok:
-            console.print(f"    [red]!! Merge failed:[/red] {merge_err}")
+        # ---- h. Merge into main (via GitHub PR) ----------------------------
+        console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
+        merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
+        if not merged:
+            console.print(f"    [red]!! GitHub PR merge failed:[/red] {merge_err}")
             task["status"] = "failed"
-            task["error"] = f"Merge failed: {merge_err}"
-            wt._delete_branch(repo_root, branch_name)
+            task["error"] = f"GitHub PR merge failed: {merge_err}"
+            # GrindBot still expects a local branch to exist for further processing
+            # If the GitHub PR merge failed, the remote branch might still exist.
+            # We retain the local branch here for potential manual recovery or re-attempt.
+            # wt._delete_branch(repo_root, branch_name) # Do not delete branch here
             return task
+
+        default_branch = wt.get_default_branch(repo_root)
+        try:
+            subprocess.run(
+                ["git", "pull", "origin", default_branch],
+                cwd=str(repo_root),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            console.print(
+                f"    [green]Pulled latest {default_branch} after merge.[/green]"
+            )
+        except subprocess.CalledProcessError as exc:
+            console.print(
+                f"    [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
+            )
 
         # ---- i. Claude post-merge review (before push) ---------------------
         console.print("    [dim]Claude reviewing merge...[/dim]")
