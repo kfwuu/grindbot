@@ -843,7 +843,7 @@ def run_grind(
         )
         return []
 
-    pending = [t for t in all_tasks if t.get("status") in ("pending", "failed")]
+    pending = [t for t in all_tasks if t.get("status") == "pending"]
     if not pending:
         console.print(
             "[yellow]No pending or failed tasks — everything is completed.[/yellow]"
