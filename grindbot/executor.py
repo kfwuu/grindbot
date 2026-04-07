@@ -372,14 +372,29 @@ def _run_single_file(
         t = threading.Thread(target=_read_stdout, daemon=True)
         t.start()
 
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            stripped = line.rstrip()
-            if stripped:
-                console.print(f"    {stripped}")
+        stderr_chunks: list[str] = []
 
-        proc.wait(timeout=timeout)
+        def _read_stderr() -> None:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                stripped = line.rstrip()
+                if stripped:
+                    console.print(f"    {stripped}")
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            raise
+
         t.join(timeout=5)
+        stderr_thread.join(timeout=10)
+        stderr_text = "".join(stderr_chunks)
         return proc.returncode, "".join(stdout_lines)
 
     except subprocess.TimeoutExpired:
