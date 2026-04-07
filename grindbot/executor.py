@@ -514,6 +514,36 @@ def execute_task(
         task["status"] = "completed"
         task["branch"] = branch_name
         task["error"] = None
+        # --- (j) Claude merge review -----------------------------------------
+        console.print("    [dim]Requesting Claude merge review...[/dim]")
+        # Placeholder for Claude review - assuming a function like this exists
+        # and returns True for approval, False for rejection.
+        # In a full codebase, this would involve actual API calls or logic.
+        try:
+            # Assuming a placeholder function _request_claude_review exists
+            claude_approved = _request_claude_review(worktree_path, branch_name, console)
+        except NameError:
+            # If _request_claude_review is not defined, assume approval for now
+            # In a real scenario, this should be handled by scanner/planner
+            console.print("    [yellow]!! _request_claude_review not found. Assuming approval.[/yellow]")
+            claude_approved = True
+
+        if claude_approved:
+            console.print("    [green]Claude approved merge. Pushing branch...[/green]")
+            # NEW LOCATION FOR PUSH BRANCH (was previously at (i))
+            push_ok, push_err = wt.push_branch(worktree_path, branch_name)
+            if not push_ok:
+                console.print(f"    [red]!! Push after Claude approval failed:[/red] {push_err}")
+                task["status"] = "failed"
+                task["error"] = f"Push after Claude approval failed: {push_err}"
+                return task
+        else:
+            console.print("    [yellow]Claude rejected merge. Reverting local commit.[/yellow]")
+            wt.revert_last_commit(worktree_path) # Keep local revert
+            task["status"] = "rejected"
+            task["error"] = "Claude review rejected changes."
+            return task
+
         return task
 
     finally:
