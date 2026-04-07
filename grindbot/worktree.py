@@ -39,6 +39,13 @@ def create_worktree(
         except OSError as exc:
             return False, f"Could not remove existing worktree path: {exc}"
 
+    subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+
     result = subprocess.run(
         ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
         cwd=str(repo_root),
