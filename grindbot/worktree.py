@@ -382,6 +382,103 @@ def push_branch(
     return True, None
 
 
+def create_github_pr(
+    repo_root: Path,
+    branch_name: str,
+    title: str,
+    body: str,
+    base_branch: str,
+) -> tuple[bool, str]:
+    """Create a GitHub pull request using the gh CLI.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        branch_name: The head branch to open the PR from.
+        title: PR title string.
+        body: PR body markdown string.
+        base_branch: The base branch to merge into (e.g. 'main').
+
+    Returns:
+        (True, pr_url) on success, (False, error_message) on failure.
+    """
+    result = subprocess.run(
+        [
+            "gh", "pr", "create",
+            "--title", title,
+            "--body", body,
+            "--base", base_branch,
+            "--head", branch_name,
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "gh pr create failed"
+    return True, result.stdout.strip()
+
+
+def merge_github_pr(
+    repo_root: Path,
+    branch_name: str,
+) -> tuple[bool, Optional[str]]:
+    """Merge a GitHub pull request using the gh CLI (squash merge).
+
+    Deletes the remote branch automatically after merging.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        branch_name: The PR head branch name.
+
+    Returns:
+        (True, None) on success, (False, error_message) on failure.
+    """
+    result = subprocess.run(
+        ["gh", "pr", "merge", branch_name, "--squash", "--delete-branch"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip() or "gh pr merge failed"
+        return False, err
+    return True, None
+
+
+def close_github_pr(
+    repo_root: Path,
+    branch_name: str,
+    reason: str = "",
+) -> tuple[bool, Optional[str]]:
+    """Close a GitHub pull request and delete the remote branch.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        branch_name: The PR head branch name.
+        reason: Optional comment explaining why the PR was closed.
+
+    Returns:
+        (True, None) on success, (False, error_message) on failure.
+    """
+    comment = f"Claude rejected: {reason}" if reason else "Automatically closed by GrindBot."
+    result = subprocess.run(
+        ["gh", "pr", "close", branch_name, "--comment", comment],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    # Best-effort: delete the remote branch regardless of PR close result
+    subprocess.run(
+        ["git", "push", "origin", "--delete", branch_name],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "gh pr close failed"
+    return True, None
+
+
 def revert_last_commit(
     repo_root: Path,
     remote: str = "origin",
@@ -427,6 +524,28 @@ def get_head_diff(repo_root: Path) -> str:
     """
     result = subprocess.run(
         ["git", "show", "HEAD", "--stat", "-p"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
+def get_branch_diff(repo_root: Path, branch_name: str) -> str:
+    """Return the full diff of the latest commit on a named branch.
+
+    Used to get the diff of a task branch after the worktree has been removed
+    but before merging, so Claude can review or write a PR description.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        branch_name: Branch name whose HEAD commit diff is returned.
+
+    Returns:
+        git show output as a string, or empty string on failure.
+    """
+    result = subprocess.run(
+        ["git", "show", branch_name, "--stat", "-p"],
         cwd=str(repo_root),
         capture_output=True,
         text=True,
