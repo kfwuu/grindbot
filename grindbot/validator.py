@@ -197,12 +197,15 @@ def _check_tests(
         If tests are skipped (no pytest / no tests dir), returns (True, None, warning).
     """
     # Check pytest availability
-    pytest_check = subprocess.run(
-        ["python", "-m", "pytest", "--version"],
-        cwd=str(worktree_path),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        pytest_check = subprocess.run(
+            ["python", "-m", "pytest", "--version"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return True, None, "Tests skipped - python executable not found on PATH"
     if pytest_check.returncode != 0:
         return True, None, "pytest not available - tests skipped"
 
