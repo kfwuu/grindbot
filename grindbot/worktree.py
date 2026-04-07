@@ -185,6 +185,27 @@ def merge_branch(
     Returns:
         (True, None) on success, (False, error_message) on conflict/failure.
     """
+    # Determine the default branch (main or master)
+    default_branch_result = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if default_branch_result.returncode != 0:
+        return (
+            False,
+            "HEAD is detached in repo_root; cannot merge. "
+            "Ensure the main repository is on the default branch before merging.",
+        )
+    current_branch = default_branch_result.stdout.strip()
+    # Accept only main or master as valid merge targets
+    if current_branch not in ("main", "master"):
+        return (
+            False,
+            f"repo_root HEAD is on '{current_branch}', expected 'main' or 'master'. "
+            "Aborting merge to avoid merging into the wrong branch.",
+        )
     result = subprocess.run(
         ["git", "merge", branch_name, "--no-ff", "-m", f"Merge {branch_name}"],
         cwd=str(repo_root),
