@@ -259,6 +259,50 @@ def _strip_fences(text: str) -> str:
     return text
 
 
+def _looks_like_code(text: str) -> bool:
+    """Return True if text plausibly contains source code rather than English prose.
+
+    Heuristic checks:
+    - Rejects empty or very short output.
+    - Rejects text that starts with common Gemini apology/meta phrases.
+    - Rejects text where most lines look like plain English sentences.
+
+    Args:
+        text: The candidate source code string.
+
+    Returns:
+        True if it looks like code, False if it looks like natural language.
+    """
+    stripped = text.strip()
+    if not stripped or len(stripped) < 10:
+        return False
+    first_line = stripped.split('\n', 1)[0].strip()
+    reject_prefixes = (
+        "I", "Sorry", "I'm", "Apolog", "Thank", "Hello",
+        "Sure,", "Here is", "Here's", "Unfortunately",
+        "It seems", "It looks", "This file", "The file",
+        "I cannot", "I can't", "I don't", "Let me",
+        "Note:", "Please", "As an AI",
+    )
+    for prefix in reject_prefixes:
+        if first_line.startswith(prefix):
+            return False
+    lines = stripped.split('\n')
+    if len(lines) < 2:
+        return True
+    english_line_count = 0
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.endswith('.') and ' ' in s and not s.startswith('#') and not s.startswith('//'):
+            english_line_count += 1
+    ratio = english_line_count / max(len([l for l in lines if l.strip()]), 1)
+    if ratio > 0.5:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Gemini CLI caller — single-API-call mode + tool-call fallback
 # ---------------------------------------------------------------------------
