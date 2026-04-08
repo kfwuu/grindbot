@@ -625,6 +625,7 @@ def execute_task(
         task["error"] = f"Worktree creation failed: {wt_err}"
         return task
 
+    branch_safe_to_delete: bool = True
     try:
         # ---- b. Resolve GEMINI.md for GEMINI_SYSTEM_MD env var -------------
         # The file stays in the repo root — no copy into the worktree needed.
@@ -757,6 +758,7 @@ def execute_task(
         task["branch"] = branch_name
 
         # ---- g. Cleanup worktree (keep branch for merge) -------------------
+        branch_safe_to_delete = False
         wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
 
         # ---- h. Merge into main (via GitHub PR) ----------------------------
@@ -825,7 +827,12 @@ def execute_task(
     finally:
         # Safety net — cleanup worktree if still present (crash/early return)
         if worktree_path.exists():
-            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=False)
+            wt.cleanup_worktree(
+                repo_root,
+                worktree_path,
+                branch_name,
+                keep_branch=not branch_safe_to_delete,
+            )
 
 
 # ---------------------------------------------------------------------------
