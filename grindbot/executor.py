@@ -462,10 +462,20 @@ def _run_tool_mode(
         proc.stdin.write(prompt)
         proc.stdin.close()
 
-        for line in proc.stderr:
-            stripped = line.rstrip()
-            if stripped:
-                console.print(f"    {stripped}")
+        stderr_lines: list[str] = []
+
+        def _drain_stderr():
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                text = line.rstrip('\n')
+                if text:
+                    console.print(text, style='dim')
+                    stderr_lines.append(text)
+
+        stderr_thread = threading.Thread(
+            target=_drain_stderr, daemon=True
+        )
+        stderr_thread.start()
 
         proc.wait(timeout=timeout)
         t.join(timeout=5)
