@@ -11,6 +11,7 @@ Design rules enforced here:
 import ast
 import json
 import os
+import fnmatch
 import re
 import shutil
 import subprocess
@@ -630,6 +631,51 @@ def _safe_branch_name(task_id: str, title: str) -> str:
     slug = slug.strip("-")[:50]
     return f"grindbot/task-{task_id}-{slug}"
 
+def _load_ignore_patterns() -> list:
+    """Load patterns from .grindbot/ignore file.
+
+    Returns:
+        List of non-empty, non-comment pattern strings.
+    """
+    ignore_path = Path('.grindbot') / 'ignore'
+    if not ignore_path.exists():
+        return []
+    patterns = []
+    try:
+        text = ignore_path.read_text(encoding='utf-8')
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                patterns.append(stripped)
+    except OSError:
+        return []
+    return patterns
+
+
+def _file_is_ignored(filepath: str, patterns: list) -> bool:
+    """Check if a file path matches any ignore pattern.
+
+    Args:
+        filepath: Relative file path from task dict.
+        patterns: List of fnmatch-compatible patterns.
+
+    Returns:
+        True if the file matches any pattern.
+    """
+    if not filepath or not patterns:
+        return False
+    from pathlib import PurePath
+    pure = PurePath(filepath)
+    for pattern in patterns:
+        if fnmatch.fnmatch(filepath, pattern):
+            return True
+        if fnmatch.fnmatch(pure.name, pattern):
+            return True
+        for parent in pure.parents:
+            if fnmatch.fnmatch(str(parent), pattern):
+                return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Single-task executor
@@ -669,6 +715,18 @@ def execute_task(
     worktree_path = worktrees_dir / f"task-{task_id}"
 
     console.print(f"  [cyan]->[/cyan] Task [bold]{task_id}[/bold]: {title}")
+
+    ignore_patterns = _load_ignore_patterns()
+    task_file = task.get('file', '')
+    if _file_is_ignored(task_file, ignore_patterns):
+        console.print(
+            f'[yellow]Skipping task {task.get("id", "?")}:'
+            f' file is in .grindbot/ignore[/yellow]'
+        )
+        return {
+            'status': 'skipped',
+            'reason': 'file is in .grindbot/ignore',
+        }
 
     # ---- a. Create worktree ------------------------------------------------
     wt_ok, wt_err = wt.create_worktree(repo_root, branch_name, worktree_path)
