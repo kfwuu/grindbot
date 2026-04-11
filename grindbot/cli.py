@@ -390,6 +390,7 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
 
     project_path = Path(path).resolve()
     grindbot_dir = config.find_grindbot_dir(project_path)
+    project_root = grindbot_dir.parent
     if grindbot_dir is None:
         console.print(
             "[red]No .grindbot/ directory found.[/red] "
@@ -430,10 +431,10 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
             console.print("  [dim]Re-scanning codebase for new issues...[/dim]")
             source_context = scanner.collect_source_files(project_path)
             raw_new = plan_tasks(source_context)
-            all_tasks = config.load_tasks(project_path)
+            all_tasks = config.load_tasks(project_root)
             merged = planner.merge_new_tasks(all_tasks, raw_new)
             new_count = len(merged) - len(all_tasks)
-            config.save_tasks(project_path, merged)
+            config.save_tasks(project_root, merged)
             if new_count:
                 console.print(f"  [green]+{new_count} new task(s) queued.[/green]")
             else:
