@@ -91,6 +91,39 @@ def _sanitize(text: str) -> str:
 _CMD_UNSAFE: frozenset[str] = frozenset('|"<>&^%')
 
 
+# ---------------------------------------------------------------------------
+# Gemini CLI safety flags
+# ---------------------------------------------------------------------------
+# SECURITY NOTE: --yolo auto-approves ALL Gemini tool calls including
+# file writes, deletions, and arbitrary shell commands.  This is required
+# for unattended automation (removing it causes the subprocess to hang
+# waiting for interactive confirmation).
+#
+# Mitigations:
+#   1. Each task runs in an isolated git worktree, limiting blast radius.
+#   2. Set GRINDBOT_GEMINI_SANDBOX=1 to append --sandbox to Gemini CLI
+#      invocations, restricting file and network access.
+#   3. For maximum safety, run GrindBot itself inside a container or
+#      chroot so that even with --yolo, damage is bounded.
+# ---------------------------------------------------------------------------
+
+_GEMINI_SANDBOX: bool = os.environ.get(
+    'GRINDBOT_GEMINI_SANDBOX', ''
+) not in ('', '0', 'false', 'no')
+
+
+def _gemini_safety_flags() -> list[str]:
+    """Return the list of Gemini CLI flags controlling tool approval.
+
+    Always includes --yolo (required for unattended operation).
+    Adds --sandbox when GRINDBOT_GEMINI_SANDBOX is set.
+    """
+    flags = ['--yolo']
+    if _GEMINI_SANDBOX:
+        flags.append('--sandbox')
+    return flags
+
+
 def _sanitize_prompt(text: str) -> str:
     """Strip only the characters that break Windows CMD .cmd wrapper invocation.
 
@@ -363,7 +396,7 @@ def _run_single_file(
 
         stdin_fh = open(tmp_path, encoding="utf-8")
         proc = subprocess.Popen(
-            [gemini_path, "--model", model, "-p", prompt, "--yolo"],
+            [gemini_path, "--model", model, "-p", prompt, *_gemini_safety_flags()],
             cwd=str(cwd),
             stdin=stdin_fh,
             stdout=subprocess.PIPE,
@@ -447,7 +480,7 @@ def _run_tool_mode(
 
     try:
         proc = subprocess.Popen(
-            [gemini_path, "--model", model, "--yolo"],
+            [gemini_path, "--model", model, *_gemini_safety_flags()],
             cwd=str(cwd),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
