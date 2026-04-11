@@ -626,6 +626,7 @@ def execute_task(
         return task
 
     try:
+        worktree_cleaned = False # Initialize flag
         # ---- b. Resolve GEMINI.md for GEMINI_SYSTEM_MD env var -------------
         # The file stays in the repo root — no copy into the worktree needed.
         system_md_path: Optional[Path] = None
@@ -757,7 +758,7 @@ def execute_task(
         task["branch"] = branch_name
 
         # ---- g. Cleanup worktree (keep branch for merge) -------------------
-        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
+        # This cleanup call was moved to after the successful merge/push.
 
         # ---- h. Merge into main (via GitHub PR) ----------------------------
         console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
@@ -808,6 +809,10 @@ def execute_task(
                 task["push_error"] = push_err
             else:
                 console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+
+            # Moved cleanup: After successful merge/push, clean worktree but keep branch.
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
+            worktree_cleaned = True # Set flag
         else:
             console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
             console.print("    [dim]Reverting...[/dim]")
@@ -824,8 +829,12 @@ def execute_task(
 
     finally:
         # Safety net — cleanup worktree if still present (crash/early return)
-        if worktree_path.exists():
-            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=False)
+        if not worktree_cleaned and worktree_path and Path(worktree_path).exists():
+            branch_has_value = (task.get('status') == 'completed')
+            wt.cleanup_worktree(
+                repo_root, worktree_path, branch_name,
+                keep_branch=branch_has_value
+            )
 
 
 # ---------------------------------------------------------------------------
