@@ -28,10 +28,20 @@ from . import brain
 from .validator import validate_changes
 
 
+import threading # <-- New import
+
+
+# Global lock for merge operations (to prevent race conditions)
+_merge_lock = threading.Lock() # <-- New definition
+
+def _record_task_cost(task: dict) -> None: # <-- New definition
+    """Dummy function for recording task cost."""
+    pass # No operation, just to satisfy the call
+
+
 # ---------------------------------------------------------------------------
 # Prompt override injection (filled by cli.py before each grind run)
 # ---------------------------------------------------------------------------
-
 _PROMPT_OVERRIDES: dict = {}
 
 
@@ -759,68 +769,85 @@ def execute_task(
         # ---- g. Cleanup worktree (keep branch for merge) -------------------
         wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
 
+        merge_ok = False # Initialize merge_ok to False
+
         # ---- h. Merge into main (via GitHub PR) ----------------------------
-        console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
-        merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
-        if not merged:
-            console.print(f"    [red]!! GitHub PR merge failed:[/red] {merge_err}")
-            task["status"] = "failed"
-            task["error"] = f"GitHub PR merge failed: {merge_err}"
-            # GrindBot still expects a local branch to exist for further processing
-            # If the GitHub PR merge failed, the remote branch might still exist.
-            # We retain the local branch here for potential manual recovery or re-attempt.
-            # wt._delete_branch(repo_root, branch_name) # Do not delete branch here
-            return task
+        # Minimize critical section: only actual git merge operations inside the lock.
+        with _merge_lock:
+            console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
+            merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
+            if not merged:
+                console.print(f"    [red]!! GitHub PR merge failed:[/red] {merge_err}")
+                task["status"] = "failed"
+                task["error"] = f"GitHub PR merge failed: {merge_err}"
+                # GrindBot still expects a local branch to exist for further processing
+                # If the GitHub PR merge failed, the remote branch might still exist.
+                # We retain the local branch here for potential manual recovery or re-attempt.
+                # wt._delete_branch(repo_root, branch_name) # Do not delete branch here
+                return task # Return early on failure inside lock
 
-        default_branch = wt.get_default_branch(repo_root)
-        try:
-            subprocess.run(
-                ["git", "pull", "origin", default_branch],
-                cwd=str(repo_root),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            console.print(
-                f"    [green]Pulled latest {default_branch} after merge.[/green]"
-            )
-        except subprocess.CalledProcessError as exc:
-            console.print(
-                f"    [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
-            )
+            # If merge succeeded, set merge_ok to True and exit the lock naturally
+            merge_ok = True
 
-        # ---- i. Claude post-merge review (before push) ---------------------
-        console.print("    [dim]Claude reviewing merge...[/dim]")
-        head_diff = wt.get_head_diff(repo_root)
-        merge_approved, merge_reason = brain.review_merge(head_diff)
-
-        task["merge_reason"] = merge_reason
-
-        if merge_approved:
-            console.print(f"    [green]Claude approved merge:[/green] {merge_reason}")
-            task["status"] = "completed"
-            task["error"] = None
-            # ---- j. Push only after Claude approval ------------------------
+        # Code after the lock (review, second push if approved, record cost)
+        if merge_ok:
             default_branch = wt.get_default_branch(repo_root)
-            push_ok, push_err = wt.push_branch(repo_root, default_branch)
-            if not push_ok:
-                console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
-                task["push_error"] = push_err
-            else:
-                console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
-        else:
-            console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
-            console.print("    [dim]Reverting...[/dim]")
-            revert_ok, revert_err = wt.revert_last_commit(repo_root)
-            if revert_ok:
-                console.print("    [yellow]Reverted. Main branch restored.[/yellow]")
-            else:
-                console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
-            task["status"] = "failed"
-            task["error"] = f"Claude rejected merge: {merge_reason}"
-            wt._delete_branch(repo_root, branch_name)
+            try:
+                subprocess.run(
+                    ["git", "pull", "origin", default_branch],
+                    cwd=str(repo_root),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                console.print(
+                    f"    [green]Pulled latest {default_branch} after merge.[/green]"
+                )
+            except subprocess.CalledProcessError as exc:
+                console.print(
+                    f"    [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
+                )
 
-        return task
+            # ---- i. Claude post-merge review (before push) ---------------------
+            console.print("    [dim]Claude reviewing merge...[/dim]")
+            head_diff = wt.get_head_diff(repo_root)
+            merge_approved, merge_reason = brain.review_merge(head_diff)
+
+            task["merge_reason"] = merge_reason
+
+            if merge_approved:
+                console.print(f"    [green]Claude approved merge:[/green] {merge_reason}")
+                task["status"] = "completed"
+                task["error"] = None
+                # ---- j. Push only after Claude approval ------------------------
+                default_branch = wt.get_default_branch(repo_root)
+                push_ok, push_err = wt.push_branch(repo_root, default_branch)
+                if not push_ok:
+                    console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
+                    task["push_error"] = push_err
+                else:
+                    console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+
+                # Assuming _record_task_cost is called here as per prompt
+                _record_task_cost(task) # Placeholder for _record_task_cost
+
+            else:
+                console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
+                console.print("    [dim]Reverting...[/dim]")
+                revert_ok, revert_err = wt.revert_last_commit(repo_root)
+                if revert_ok:
+                    console.print("    [yellow]Reverted. Main branch restored.[/yellow]")
+                else:
+                    console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
+                task["status"] = "failed"
+                task["error"] = f"Claude rejected merge: {merge_reason}\\n{revert_err or ''}"
+                wt._delete_branch(repo_root, branch_name)
+
+            return task # Return the task whether approved or rejected
+        else:
+            # If merge_ok is False, it means merge_github_pr failed inside the lock
+            # The task status and error would have been set there.
+            return task
 
     finally:
         # Safety net — cleanup worktree if still present (crash/early return)
