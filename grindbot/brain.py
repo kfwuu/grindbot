@@ -11,6 +11,7 @@ Claude is the orchestrator. It never touches files directly.
 import json
 import os
 import re
+import stat
 from typing import Any
 
 import httpx
@@ -204,6 +205,25 @@ def _get_prompt(key: str, default: str) -> str:
     return _PROMPT_OVERRIDES.get(key, default)
 
 
+def _check_env_file_permissions(path: str) -> None:
+    """Warn if .env file is group or world readable on Unix."""
+    if os.name != 'posix':
+        return
+    try:
+        mode = os.stat(path).st_mode
+        if mode & (stat.S_IRGRP | stat.S_IWGRP |
+                      stat.S_IROTH | stat.S_IWOTH):
+            octal = oct(stat.S_IMODE(mode))
+            console.print(
+                '[bold yellow]WARNING:[/bold yellow] '
+                f'{path} has permissions {octal}. '
+                'Expected 0o600 or stricter. '
+                'Run: chmod 600 ' + path
+            )
+    except OSError:
+        pass
+
+
 def _get_api_key() -> str | None:
     """Return KIE_API_KEY from environment or ~/.env, or None if not found.
 
@@ -214,21 +234,24 @@ def _get_api_key() -> str | None:
     if key:
         return key
 
-    from pathlib import Path
-    env_file = Path.home() / ".env"
-    if env_file.exists():
-        try:
-            for line in env_file.read_text(encoding="utf-8").splitlines():
+    env_path = os.path.expanduser('~/.env')
+    if os.path.exists(env_path):
+        _check_env_file_permissions(env_path)
+        with open(env_path) as f:
+            for line in f:
                 line = line.strip()
-                if line.startswith("KIE_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if key:
-                        os.environ["KIE_API_KEY"] = key
-                        return key
-        except OSError:
-            pass
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                key, _, value = line.partition('=')
+                k = key.strip()
+                v = value.strip()
+                if k == 'KIE_API_KEY':
+                    return v
+                os.environ.setdefault(k, v)
 
-    return None
+    return os.environ.get('KIE_API_KEY')
 
 
 def _call_claude(system: str, user_content: str, timeout: int) -> str:
