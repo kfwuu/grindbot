@@ -353,7 +353,7 @@ def _run_single_file(
 
         stdin_fh = open(tmp_path, encoding="utf-8")
         proc = subprocess.Popen(
-            [gemini_path, "--model", model, "-p", prompt, "--yolo"],
+            [gemini_path, "--model", model, "-p", prompt],
             cwd=str(cwd),
             stdin=stdin_fh,
             stdout=subprocess.PIPE,
@@ -437,7 +437,7 @@ def _run_tool_mode(
 
     try:
         proc = subprocess.Popen(
-            [gemini_path, "--model", model, "--yolo"],
+            [gemini_path, "--model", model],
             cwd=str(cwd),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
