@@ -10,13 +10,39 @@ Claude is the orchestrator. It never touches files directly.
 """
 import json
 import os
+import platform
 import re
+import stat
 from typing import Any
 
 import httpx
 from rich.console import Console
 
 console = Console()
+
+_cached_api_key: str | None = None
+
+
+def _check_env_file_permissions(path: str) -> None:
+    if platform.system() == 'Windows':
+        return
+    try:
+        file_stat = os.stat(path)
+        mode = file_stat.st_mode
+        if mode & (stat.S_IRGRP | stat.S_IWGRP |
+                      stat.S_IXGRP | stat.S_IROTH |
+                      stat.S_IWOTH | stat.S_IXOTH):
+            octal_mode = oct(stat.S_IMODE(mode))
+            console.print(
+                '[bold yellow]WARNING:[/bold yellow] '
+                f'{path} has permissions {octal_mode}. '
+                'Expected 0o600 or stricter. '
+                'The file may be readable by other users. '
+                'Run: chmod 600 ' + path
+            )
+    except OSError:
+        pass
+
 
 _KIE_URL = "https://api.kie.ai/claude/v1/messages"
 _MODEL = "claude-opus-4-6"
@@ -210,20 +236,26 @@ def _get_api_key() -> str | None:
     Python does not auto-load ~/.env the way Gemini CLI does, so we
     check the file directly and cache the result into os.environ.
     """
+    global _cached_api_key
+    if _cached_api_key is not None:
+        return _cached_api_key
+
     key = os.environ.get("KIE_API_KEY", "").strip()
     if key:
+        _cached_api_key = key
         return key
 
     from pathlib import Path
     env_file = Path.home() / ".env"
     if env_file.exists():
+        _check_env_file_permissions(str(env_file))
         try:
             for line in env_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line.startswith("KIE_API_KEY="):
                     key = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if key:
-                        os.environ["KIE_API_KEY"] = key
+                        _cached_api_key = key
                         return key
         except OSError:
             pass
