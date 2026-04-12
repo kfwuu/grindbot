@@ -10,7 +10,9 @@ Claude is the orchestrator. It never touches files directly.
 """
 import json
 import os
+import platform
 import re
+import stat
 from typing import Any
 
 import httpx
@@ -26,6 +28,8 @@ _ORCHESTRATE_TIMEOUT = 45  # Claude writes a Gemini prompt
 _REVIEW_TIMEOUT = 60       # Claude reads a diff
 _MAX_DIFF_BYTES = 8_000    # cap diff sent to reviewer
 _MAX_FILE_PREVIEW = 3_000  # chars of file content sent to orchestrator
+
+_cached_api_key: str | None = None
 
 _PLAN_SYSTEM = """\
 You are the brain of GrindBot, an autonomous code improvement engine.
@@ -207,23 +211,40 @@ def _get_prompt(key: str, default: str) -> str:
 def _get_api_key() -> str | None:
     """Return KIE_API_KEY from environment or ~/.env, or None if not found.
 
-    Python does not auto-load ~/.env the way Gemini CLI does, so we
-    check the file directly and cache the result into os.environ.
+    The key is cached in a module-level variable to avoid re-reading the file
+    and prevent leaking the secret to subprocesses via os.environ.
     """
+    global _cached_api_key
+
+    if _cached_api_key:
+        return _cached_api_key
+
+    # 1. Try environment variable first (preserves ability to set via env)
     key = os.environ.get("KIE_API_KEY", "").strip()
     if key:
+        _cached_api_key = key
         return key
 
+    # 2. Try ~/.env file
     from pathlib import Path
     env_file = Path.home() / ".env"
     if env_file.exists():
+        # Unix file permission check
+        if platform.system() != "Windows":
+            mode = os.stat(env_file).st_mode
+            if (mode & 0o077) != 0:
+                console.print(
+                    f"[bold yellow]WARNING:[/bold yellow] {env_file} has overly "
+                    "permissive permissions. Run: chmod 600 ~/.env"
+                )
+
         try:
             for line in env_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line.startswith("KIE_API_KEY="):
                     key = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if key:
-                        os.environ["KIE_API_KEY"] = key
+                        _cached_api_key = key
                         return key
         except OSError:
             pass
