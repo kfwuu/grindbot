@@ -11,7 +11,8 @@ Claude is the orchestrator. It never touches files directly.
 import json
 import os
 import re
-import threading # Added threading import
+import stat
+import threading
 from typing import Any
 
 import httpx
@@ -28,7 +29,10 @@ _REVIEW_TIMEOUT = 60       # Claude reads a diff
 _MAX_DIFF_BYTES = 8_000    # cap diff sent to reviewer
 _MAX_FILE_PREVIEW = 3_000  # chars of file content sent to orchestrator
 
-_task_credits_local = threading.local() # Replaced _task_credits = 0.0
+# Mask for overly permissive group/other permissions on .env files
+_OVERLY_PERMISSIVE = stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | \
+                       stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
+_task_credits_local = threading.local()
 
 _PLAN_SYSTEM = """\
 You are the brain of GrindBot, an autonomous code improvement engine.
@@ -193,6 +197,7 @@ def load_prompt_overrides(store: dict) -> None:
     global _PROMPT_OVERRIDES
     _PROMPT_OVERRIDES = store.get("prompts", {})
 
+_cached_api_key: str | None = None # Added for in-memory caching
 
 def _get_prompt(key: str, default: str) -> str:
     """Return evolved prompt override if available, else the hardcoded default.
@@ -213,20 +218,37 @@ def _get_api_key() -> str | None:
     Python does not auto-load ~/.env the way Gemini CLI does, so we
     check the file directly and cache the result into os.environ.
     """
+    global _cached_api_key
+    if _cached_api_key is not None:
+        return _cached_api_key
+
     key = os.environ.get("KIE_API_KEY", "").strip()
     if key:
+        _cached_api_key = key
         return key
 
     from pathlib import Path
     env_file = Path.home() / ".env"
     if env_file.exists():
+        # Check permissions on Unix-like systems
+        if os.name != 'nt':
+            try:
+                mode = os.stat(str(env_file)).st_mode
+                if mode & _OVERLY_PERMISSIVE:
+                    console.print(
+                        f"[bold yellow]WARNING:[/bold yellow] {env_file} has overly permissive permissions "
+                        f"(mode {oct(mode)}). Run: chmod 600 {env_file}",
+                        style="yellow",
+                    )
+            except OSError:
+                pass
         try:
             for line in env_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line.startswith("KIE_API_KEY="):
                     key = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if key:
-                        os.environ["KIE_API_KEY"] = key
+                        _cached_api_key = key # Cache in module variable, not os.environ
                         return key
         except OSError:
             pass
