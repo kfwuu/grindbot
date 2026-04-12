@@ -626,6 +626,7 @@ def execute_task(
         return task
 
     try:
+        branch_has_pushed_commit = False
         # ---- b. Resolve GEMINI.md for GEMINI_SYSTEM_MD env var -------------
         # The file stays in the repo root — no copy into the worktree needed.
         system_md_path: Optional[Path] = None
@@ -756,8 +757,7 @@ def execute_task(
         )
         task["branch"] = branch_name
 
-        # ---- g. Cleanup worktree (keep branch for merge) -------------------
-        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
+
 
         # ---- h. Merge into main (via GitHub PR) ----------------------------
         console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
@@ -808,6 +808,7 @@ def execute_task(
                 task["push_error"] = push_err
             else:
                 console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+                branch_has_pushed_commit = True
         else:
             console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
             console.print("    [dim]Reverting...[/dim]")
@@ -818,14 +819,19 @@ def execute_task(
                 console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
             task["status"] = "failed"
             task["error"] = f"Claude rejected merge: {merge_reason}"
-            wt._delete_branch(repo_root, branch_name)
 
-        return task
+            # ---- k. Final cleanup of the worktree directory ------------------
+            # The branch is kept if a push succeeded, otherwise it's deleted.
+            # The finally block will catch this if there's an exception, but
+            # for a normal successful path, we clean up here explicitly.
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=branch_has_pushed_commit)
+
+            return task
 
     finally:
         # Safety net — cleanup worktree if still present (crash/early return)
-        if worktree_path.exists():
-            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=False)
+        if worktree_path and Path(worktree_path).exists():
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=branch_has_pushed_commit)
 
 
 # ---------------------------------------------------------------------------
