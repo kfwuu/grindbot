@@ -8,6 +8,7 @@ Checks (in order):
 """
 
 import ast
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -222,12 +223,15 @@ def _check_tests(
             )
 
     try:
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(worktree_path)
         result = subprocess.run(
             ['python', '-m', 'pytest', '-q', '--tb=short', '--no-header'],
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
             timeout=120,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return False, "Test suite timed out after 120 seconds", None
