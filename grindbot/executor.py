@@ -756,9 +756,6 @@ def execute_task(
         )
         task["branch"] = branch_name
 
-        # ---- g. Cleanup worktree (keep branch for merge) -------------------
-        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
-
         # ---- h. Merge into main (via GitHub PR) ----------------------------
         console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
         merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
@@ -808,6 +805,8 @@ def execute_task(
                 task["push_error"] = push_err
             else:
                 console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+            # ---- g. Cleanup worktree (keep branch for merge) -------------------
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
         else:
             console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
             console.print("    [dim]Reverting...[/dim]")
@@ -824,8 +823,9 @@ def execute_task(
 
     finally:
         # Safety net — cleanup worktree if still present (crash/early return)
-        if worktree_path.exists():
-            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=False)
+        if worktree_path and Path(worktree_path).exists():
+            keep = task.get('status') == 'completed'
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=keep)
 
 
 # ---------------------------------------------------------------------------
