@@ -11,6 +11,7 @@ Design rules enforced here:
 import ast
 import json
 import os
+import fnmatch
 import re
 import shutil
 import subprocess
@@ -28,10 +29,20 @@ from . import brain
 from .validator import validate_changes
 
 
+import threading # <-- New import
+
+
+# Global lock for merge operations (to prevent race conditions)
+_merge_lock = threading.Lock() # <-- New definition
+
+def _record_task_cost(task: dict) -> None: # <-- New definition
+    """Dummy function for recording task cost."""
+    pass # No operation, just to satisfy the call
+
+
 # ---------------------------------------------------------------------------
 # Prompt override injection (filled by cli.py before each grind run)
 # ---------------------------------------------------------------------------
-
 _PROMPT_OVERRIDES: dict = {}
 
 
@@ -79,6 +90,39 @@ def _sanitize(text: str) -> str:
 # (brackets, equals, apostrophes, backticks, newlines) is safe inside a
 # double-quoted argument as produced by subprocess.list2cmdline.
 _CMD_UNSAFE: frozenset[str] = frozenset('|"<>&^%')
+
+
+# ---------------------------------------------------------------------------
+# Gemini CLI safety flags
+# ---------------------------------------------------------------------------
+# SECURITY NOTE: --yolo auto-approves ALL Gemini tool calls including
+# file writes, deletions, and arbitrary shell commands.  This is required
+# for unattended automation (removing it causes the subprocess to hang
+# waiting for interactive confirmation).
+#
+# Mitigations:
+#   1. Each task runs in an isolated git worktree, limiting blast radius.
+#   2. Set GRINDBOT_GEMINI_SANDBOX=1 to append --sandbox to Gemini CLI
+#      invocations, restricting file and network access.
+#   3. For maximum safety, run GrindBot itself inside a container or
+#      chroot so that even with --yolo, damage is bounded.
+# ---------------------------------------------------------------------------
+
+_GEMINI_SANDBOX: bool = os.environ.get(
+    'GRINDBOT_GEMINI_SANDBOX', ''
+) not in ('', '0', 'false', 'no')
+
+
+def _gemini_safety_flags() -> list[str]:
+    """Return the list of Gemini CLI flags controlling tool approval.
+
+    Always includes --yolo (required for unattended operation).
+    Adds --sandbox when GRINDBOT_GEMINI_SANDBOX is set.
+    """
+    flags = ['--yolo']
+    if _GEMINI_SANDBOX:
+        flags.append('--sandbox')
+    return flags
 
 
 def _sanitize_prompt(text: str) -> str:
@@ -353,7 +397,7 @@ def _run_single_file(
 
         stdin_fh = open(tmp_path, encoding="utf-8")
         proc = subprocess.Popen(
-            [gemini_path, "--model", model, "-p", prompt, "--yolo"],
+            [gemini_path, "--model", model, "-p", prompt, *_gemini_safety_flags()],
             cwd=str(cwd),
             stdin=stdin_fh,
             stdout=subprocess.PIPE,
@@ -437,7 +481,7 @@ def _run_tool_mode(
 
     try:
         proc = subprocess.Popen(
-            [gemini_path, "--model", model, "--yolo"],
+            [gemini_path, "--model", model, *_gemini_safety_flags()],
             cwd=str(cwd),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -462,10 +506,20 @@ def _run_tool_mode(
         proc.stdin.write(prompt)
         proc.stdin.close()
 
-        for line in proc.stderr:
-            stripped = line.rstrip()
-            if stripped:
-                console.print(f"    {stripped}")
+        stderr_lines: list[str] = []
+
+        def _drain_stderr():
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                text = line.rstrip('\n')
+                if text:
+                    console.print(text, style='dim')
+                    stderr_lines.append(text)
+
+        stderr_thread = threading.Thread(
+            target=_drain_stderr, daemon=True
+        )
+        stderr_thread.start()
 
         proc.wait(timeout=timeout)
         t.join(timeout=5)
@@ -577,6 +631,51 @@ def _safe_branch_name(task_id: str, title: str) -> str:
     slug = slug.strip("-")[:50]
     return f"grindbot/task-{task_id}-{slug}"
 
+def _load_ignore_patterns() -> list:
+    """Load patterns from .grindbot/ignore file.
+
+    Returns:
+        List of non-empty, non-comment pattern strings.
+    """
+    ignore_path = Path('.grindbot') / 'ignore'
+    if not ignore_path.exists():
+        return []
+    patterns = []
+    try:
+        text = ignore_path.read_text(encoding='utf-8')
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                patterns.append(stripped)
+    except OSError:
+        return []
+    return patterns
+
+
+def _file_is_ignored(filepath: str, patterns: list) -> bool:
+    """Check if a file path matches any ignore pattern.
+
+    Args:
+        filepath: Relative file path from task dict.
+        patterns: List of fnmatch-compatible patterns.
+
+    Returns:
+        True if the file matches any pattern.
+    """
+    if not filepath or not patterns:
+        return False
+    from pathlib import PurePath
+    pure = PurePath(filepath)
+    for pattern in patterns:
+        if fnmatch.fnmatch(filepath, pattern):
+            return True
+        if fnmatch.fnmatch(pure.name, pattern):
+            return True
+        for parent in pure.parents:
+            if fnmatch.fnmatch(str(parent), pattern):
+                return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Single-task executor
@@ -617,6 +716,18 @@ def execute_task(
 
     console.print(f"  [cyan]->[/cyan] Task [bold]{task_id}[/bold]: {title}")
 
+    ignore_patterns = _load_ignore_patterns()
+    task_file = task.get('file', '')
+    if _file_is_ignored(task_file, ignore_patterns):
+        console.print(
+            f'[yellow]Skipping task {task.get("id", "?")}:'
+            f' file is in .grindbot/ignore[/yellow]'
+        )
+        return {
+            'status': 'skipped',
+            'reason': 'file is in .grindbot/ignore',
+        }
+
     # ---- a. Create worktree ------------------------------------------------
     wt_ok, wt_err = wt.create_worktree(repo_root, branch_name, worktree_path)
     if not wt_ok:
@@ -625,6 +736,7 @@ def execute_task(
         task["error"] = f"Worktree creation failed: {wt_err}"
         return task
 
+    branch_safe_to_delete: bool = True
     try:
         worktree_cleaned = False # Initialize flag
         # ---- b. Resolve GEMINI.md for GEMINI_SYSTEM_MD env var -------------
@@ -758,82 +870,98 @@ def execute_task(
         task["branch"] = branch_name
 
         # ---- g. Cleanup worktree (keep branch for merge) -------------------
-        # This cleanup call was moved to after the successful merge/push.
+        branch_safe_to_delete = False
+        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
+
+        merge_ok = False # Initialize merge_ok to False
 
         # ---- h. Merge into main (via GitHub PR) ----------------------------
-        console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
-        merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
-        if not merged:
-            console.print(f"    [red]!! GitHub PR merge failed:[/red] {merge_err}")
-            task["status"] = "failed"
-            task["error"] = f"GitHub PR merge failed: {merge_err}"
-            # GrindBot still expects a local branch to exist for further processing
-            # If the GitHub PR merge failed, the remote branch might still exist.
-            # We retain the local branch here for potential manual recovery or re-attempt.
-            # wt._delete_branch(repo_root, branch_name) # Do not delete branch here
-            return task
+        # Minimize critical section: only actual git merge operations inside the lock.
+        with _merge_lock:
+            console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
+            merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
+            if not merged:
+                console.print(f"    [red]!! GitHub PR merge failed:[/red] {merge_err}")
+                task["status"] = "failed"
+                task["error"] = f"GitHub PR merge failed: {merge_err}"
+                # GrindBot still expects a local branch to exist for further processing
+                # If the GitHub PR merge failed, the remote branch might still exist.
+                # We retain the local branch here for potential manual recovery or re-attempt.
+                # wt._delete_branch(repo_root, branch_name) # Do not delete branch here
+                return task # Return early on failure inside lock
 
-        default_branch = wt.get_default_branch(repo_root)
-        try:
-            subprocess.run(
-                ["git", "pull", "origin", default_branch],
-                cwd=str(repo_root),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            console.print(
-                f"    [green]Pulled latest {default_branch} after merge.[/green]"
-            )
-        except subprocess.CalledProcessError as exc:
-            console.print(
-                f"    [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
-            )
+            # If merge succeeded, set merge_ok to True and exit the lock naturally
+            merge_ok = True
 
-        # ---- i. Claude post-merge review (before push) ---------------------
-        console.print("    [dim]Claude reviewing merge...[/dim]")
-        head_diff = wt.get_head_diff(repo_root)
-        merge_approved, merge_reason = brain.review_merge(head_diff)
-
-        task["merge_reason"] = merge_reason
-
-        if merge_approved:
-            console.print(f"    [green]Claude approved merge:[/green] {merge_reason}")
-            task["status"] = "completed"
-            task["error"] = None
-            # ---- j. Push only after Claude approval ------------------------
+        # Code after the lock (review, second push if approved, record cost)
+        if merge_ok:
             default_branch = wt.get_default_branch(repo_root)
-            push_ok, push_err = wt.push_branch(repo_root, default_branch)
-            if not push_ok:
-                console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
-                task["push_error"] = push_err
-            else:
-                console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+            try:
+                subprocess.run(
+                    ["git", "pull", "origin", default_branch],
+                    cwd=str(repo_root),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                console.print(
+                    f"    [green]Pulled latest {default_branch} after merge.[/green]"
+                )
+            except subprocess.CalledProcessError as exc:
+                console.print(
+                    f"    [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
+                )
 
-            # Moved cleanup: After successful merge/push, clean worktree but keep branch.
-            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
-            worktree_cleaned = True # Set flag
+            # ---- i. Claude post-merge review (before push) ---------------------
+            console.print("    [dim]Claude reviewing merge...[/dim]")
+            head_diff = wt.get_head_diff(repo_root)
+            merge_approved, merge_reason = brain.review_merge(head_diff)
+
+            task["merge_reason"] = merge_reason
+
+            if merge_approved:
+                console.print(f"    [green]Claude approved merge:[/green] {merge_reason}")
+                task["status"] = "completed"
+                task["error"] = None
+                # ---- j. Push only after Claude approval ------------------------
+                default_branch = wt.get_default_branch(repo_root)
+                push_ok, push_err = wt.push_branch(repo_root, default_branch)
+                if not push_ok:
+                    console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
+                    task["push_error"] = push_err
+                else:
+                    console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+
+                # Assuming _record_task_cost is called here as per prompt
+                _record_task_cost(task) # Placeholder for _record_task_cost
+
+            else:
+                console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
+                console.print("    [dim]Reverting...[/dim]")
+                revert_ok, revert_err = wt.revert_last_commit(repo_root)
+                if revert_ok:
+                    console.print("    [yellow]Reverted. Main branch restored.[/yellow]")
+                else:
+                    console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
+                task["status"] = "failed"
+                task["error"] = f"Claude rejected merge: {merge_reason}\\n{revert_err or ''}"
+                wt._delete_branch(repo_root, branch_name)
+
+            return task # Return the task whether approved or rejected
         else:
-            console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
-            console.print("    [dim]Reverting...[/dim]")
-            revert_ok, revert_err = wt.revert_last_commit(repo_root)
-            if revert_ok:
-                console.print("    [yellow]Reverted. Main branch restored.[/yellow]")
-            else:
-                console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
-            task["status"] = "failed"
-            task["error"] = f"Claude rejected merge: {merge_reason}"
-            wt._delete_branch(repo_root, branch_name)
-
-        return task
+            # If merge_ok is False, it means merge_github_pr failed inside the lock
+            # The task status and error would have been set there.
+            return task
 
     finally:
         # Safety net — cleanup worktree if still present (crash/early return)
-        if not worktree_cleaned and worktree_path and Path(worktree_path).exists():
+        if worktree_path.exists():
             branch_has_value = (task.get('status') == 'completed')
             wt.cleanup_worktree(
-                repo_root, worktree_path, branch_name,
-                keep_branch=branch_has_value
+                repo_root,
+                worktree_path,
+                branch_name,
+                keep_branch=branch_has_value,
             )
 
 

@@ -209,14 +209,21 @@ def _check_tests(
     if pytest_check.returncode != 0:
         return True, None, "pytest not available - tests skipped"
 
-    # Check for a tests directory
-    tests_dir = worktree_path / "tests"
-    if not tests_dir.exists():
-        return True, None, "No tests/ directory found - tests skipped"
+    test_dirs = ['tests', 'test', 'spec']
+    has_test_dir = any((worktree_path / d).is_dir() for d in test_dirs)
+
+    if not has_test_dir:
+        py_files = list(worktree_path.rglob('test_*.py'))
+        py_files += list(worktree_path.rglob('*_test.py'))
+        if not py_files:
+            return True, None, (
+                'No test directories or test files found'
+                ' - skipping tests'
+            )
 
     try:
         result = subprocess.run(
-            ["python", "-m", "pytest", "tests/", "-q", "--tb=short", "--no-header"],
+            ['python', '-m', 'pytest', '-q', '--tb=short', '--no-header'],
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
