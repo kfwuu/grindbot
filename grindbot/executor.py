@@ -794,6 +794,13 @@ def execute_task(
 
             # ---- d2. Retry: Claude writes a precise find/replace prompt ----
             if file_preview is not None:
+                # Re-read the file to get the post-Gemini edit content
+                try:
+                    if target_file and target_file.exists():
+                        file_preview = target_file.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    # Keep whatever file_preview we already have if re-read fails
+                    pass
                 console.print("    [dim]Generating precise retry prompt (Claude)...[/dim]")
                 retry_prompt = brain.orchestrate_retry(task, file_preview)
                 if retry_prompt:
