@@ -97,7 +97,7 @@ def scan(path: str, goal: str) -> None:
     scan_credits = brain.get_task_credits()
     scan_usd = scan_credits * config.CREDIT_COST_USD
     console.print(
-        f"  [bold green]Scan cost: {scan_credits:.2f} credits → ${scan_usd:.4f}[/bold green]"
+        f"  [bold green]Scan cost: {scan_credits:.2f} credits -> ${scan_usd:.4f}[/bold green]"
     )
 
     if not raw_tasks:

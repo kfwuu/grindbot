@@ -130,7 +130,7 @@ def run_reflection(
     reflect_credits = brain.get_task_credits()
     reflect_usd = reflect_credits * CREDIT_COST_USD
     console.print(
-        f"  [bold green]Reflection cost: {reflect_credits:.2f} credits → ${reflect_usd:.4f}[/bold green]"
+        f"  [bold green]Reflection cost: {reflect_credits:.2f} credits -> ${reflect_usd:.4f}[/bold green]"
     )
 
     if result is None:
