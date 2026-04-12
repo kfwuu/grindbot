@@ -11,7 +11,8 @@ Claude is the orchestrator. It never touches files directly.
 import json
 import os
 import re
-import stat # Added for file permission checks
+import stat
+import threading
 from typing import Any
 
 import httpx
@@ -31,6 +32,7 @@ _MAX_FILE_PREVIEW = 3_000  # chars of file content sent to orchestrator
 # Mask for overly permissive group/other permissions on .env files
 _OVERLY_PERMISSIVE = stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | \
                        stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
+_task_credits_local = threading.local()
 
 _PLAN_SYSTEM = """\
 You are the brain of GrindBot, an autonomous code improvement engine.
@@ -306,6 +308,7 @@ def _call_claude(system: str, user_content: str, timeout: int) -> str:
     data = resp.json()
     credits = data.get("credits_consumed")
     if credits is not None:
+        _task_credits_local.value = getattr(_task_credits_local, 'value', 0.0) + credits # Accumulate credits per thread
         console.print(f"    [dim]Claude credits used: {credits}[/dim]")
     content = data.get("content", [])
 
@@ -700,3 +703,13 @@ def reflect_session(session_data: dict, current_prompts: dict) -> dict | None:
         f"First 400 chars:\n{raw[:400]}[/yellow]"
     )
     return None
+
+
+def reset_task_credits() -> None:
+    """Resets the task credit counter for the current thread."""
+    _task_credits_local.value = 0.0
+
+
+def get_task_credits() -> float:
+    """Returns the accumulated task credits for the current thread."""
+    return getattr(_task_credits_local, 'value', 0.0)
