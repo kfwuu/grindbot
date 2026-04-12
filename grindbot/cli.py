@@ -388,14 +388,15 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
     from . import config, executor, planner, reflector, scanner
     from .brain import plan_tasks
 
-    project_path = Path(path).resolve()
-    grindbot_dir = config.find_grindbot_dir(project_path)
+    resolved_path = Path(path).resolve()
+    grindbot_dir = config.find_grindbot_dir(resolved_path)
     if grindbot_dir is None:
         console.print(
             "[red]No .grindbot/ directory found.[/red] "
             "Run [bold]grindbot init <path>[/bold] first."
         )
         sys.exit(1)
+    project_path = grindbot_dir.parent
 
     total_usd = 0.0
     cycle = 0
