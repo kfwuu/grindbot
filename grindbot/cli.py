@@ -428,17 +428,24 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
                 break
 
             # 4. Re-scan for new tasks
-            console.print("  [dim]Re-scanning codebase for new issues...[/dim]")
-            source_context = scanner.collect_source_files(project_path)
-            raw_new = plan_tasks(source_context)
-            all_tasks = config.load_tasks(grindbot_dir.parent)
-            merged = planner.merge_new_tasks(all_tasks, raw_new)
-            new_count = len(merged) - len(all_tasks)
-            config.save_tasks(grindbot_dir.parent, merged)
-            if new_count:
-                console.print(f"  [green]+{new_count} new task(s) queued.[/green]")
-            else:
-                console.print("  [dim]No new tasks found.[/dim]")
+            try:
+                console.print("  [dim]Re-scanning codebase for new issues...[/dim]")
+                source_context = scanner.collect_source_files(project_path)
+                raw_new = plan_tasks(source_context)
+                all_tasks = config.load_tasks(grindbot_dir.parent)
+                merged = planner.merge_new_tasks(all_tasks, raw_new)
+                new_count = len(merged) - len(all_tasks)
+                config.save_tasks(grindbot_dir.parent, merged)
+                if new_count:
+                    console.print(f"  [green]+{new_count} new task(s) queued.[/green]")
+                else:
+                    console.print("  [dim]No new tasks found.[/dim]")
+            except RuntimeError as exc:
+                console.print(
+                    f'[yellow]Re-scan failed: {exc} '
+                    f'-- will retry next cycle[/yellow]'
+                )
+                continue
 
             # 5. Sleep
             console.print(f"  [dim]Next cycle in {interval}s — Ctrl+C to stop.[/dim]")
