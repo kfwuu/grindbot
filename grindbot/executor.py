@@ -26,6 +26,7 @@ from rich.panel import Panel
 
 from . import worktree as wt
 from . import brain
+from . import memory as _memory
 from .validator import validate_changes
 
 
@@ -535,6 +536,23 @@ def _run_tool_mode(
         return -2, ""
 
 
+_RATE_LIMIT_PHRASES = ("429", "rate limit", "quota exceeded", "resource exhausted", "too many requests")
+_RATE_LIMIT_DELAYS = (30, 60, 120)  # seconds — exponential backoff sleep durations
+
+
+def _is_rate_limited(text: str) -> bool:
+    """Return True if Gemini CLI output contains rate-limit indicators.
+
+    Args:
+        text: Combined stdout from a Gemini CLI invocation.
+
+    Returns:
+        True if a known rate-limit phrase is found (case-insensitive).
+    """
+    lower = text.lower()
+    return any(phrase in lower for phrase in _RATE_LIMIT_PHRASES)
+
+
 def _call_gemini(
     prompt: str,
     cwd: Path,
@@ -574,17 +592,34 @@ def _call_gemini(
         if i > 0:
             console.print(f"    [yellow][!] Falling back to {model}...[/yellow]")
 
-        console.print(f"    [dim]Model: {model}  (interactive mode)[/dim]")
-        console.print("    [dim]" + "-" * 56 + "[/dim]")
-
         timeout = _MODEL_TIMEOUTS.get(model, 300)
+        rc, stdout = -99, ""
 
-        rc, stdout = _run_tool_mode(
-            gemini_path, model, prompt, cwd, timeout, console,
-            system_md_path=system_md_path,
-        )
+        # Rate-limit retry loop: up to 3 attempts with exponential backoff
+        delays = [0] + list(_RATE_LIMIT_DELAYS)
+        for rl_attempt, rl_delay in enumerate(delays):
+            if rl_delay:
+                console.print(
+                    f"    [yellow][!] Rate limited — waiting {rl_delay}s before retry "
+                    f"({rl_attempt}/{len(_RATE_LIMIT_DELAYS)})...[/yellow]"
+                )
+                time.sleep(rl_delay)
 
-        console.print("    [dim]" + "-" * 56 + "[/dim]")
+            console.print(f"    [dim]Model: {model}  (interactive mode)[/dim]")
+            console.print("    [dim]" + "-" * 56 + "[/dim]")
+
+            rc, stdout = _run_tool_mode(
+                gemini_path, model, prompt, cwd, timeout, console,
+                system_md_path=system_md_path,
+            )
+
+            console.print("    [dim]" + "-" * 56 + "[/dim]")
+
+            if rc == -1 or rc == 0:
+                break  # timeout or success — stop rate-limit retries
+            if _is_rate_limited(stdout) and rl_attempt < len(_RATE_LIMIT_DELAYS):
+                continue  # rate limited and retries remain — sleep and retry
+            break  # non-rate-limited failure or retries exhausted
 
         if rc == -1:
             if i < len(models) - 1:
@@ -682,11 +717,90 @@ def _file_is_ignored(filepath: str, patterns: list) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_diff(diff: str) -> str:
+    """Normalize line endings and strip trailing whitespace from context lines.
+
+    Converts CRLF to LF throughout the diff (sandbox is Linux, local may be Windows)
+    and strips trailing whitespace from context lines (space-prefixed) to prevent
+    git apply context mismatches caused by embedded carriage returns or trailing spaces.
+
+    Args:
+        diff: Raw git diff string from E2B sandbox.
+
+    Returns:
+        Cleaned diff string with LF line endings.
+    """
+    diff = diff.replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in diff.split("\n"):
+        if line.startswith(" "):  # context line (not + or -)
+            stripped = line.rstrip()
+            # Preserve the space prefix for blank context lines (a blank line in
+            # source appears as a single " " in the diff; stripping to "" makes
+            # git apply see an empty line mid-hunk → "corrupt patch").
+            lines.append(stripped if stripped else " ")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _apply_sandbox_diff(diff: str, worktree_path: Path, console: Console) -> tuple[bool, str]:
+    """Apply a git diff returned from the E2B sandbox to the local worktree.
+
+    Args:
+        diff: The git diff string returned by the sandbox.
+        worktree_path: Path to the local worktree to patch.
+        console: Rich console for progress output.
+
+    Returns:
+        Tuple of (success, error_message).
+    """
+    if not diff.strip():
+        return False, "Empty diff returned from sandbox — Gemini made no changes"
+    normalized = _normalize_diff(diff)
+    # Attempt 1: standard apply
+    result = subprocess.run(
+        ["git", "apply", "--whitespace=fix", "--ignore-whitespace"],
+        input=normalized,
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True, ""
+    # Attempt 2: 3-way merge (tolerates missing blob hashes in diff index)
+    result2 = subprocess.run(
+        ["git", "apply", "--3way", "--whitespace=fix", "--ignore-whitespace"],
+        input=normalized,
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    if result2.returncode == 0:
+        return True, ""
+    # Attempt 3: zero context — apply hunk at line number only, no context matching
+    result3 = subprocess.run(
+        ["git", "apply", "-C0", "--whitespace=fix", "--ignore-whitespace"],
+        input=normalized,
+        cwd=str(worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    if result3.returncode == 0:
+        return True, ""
+    err = (result.stderr or result2.stderr or result3.stderr or "unknown error").strip()
+    return False, f"git apply failed: {err}"
+
+
 def execute_task(
     task: dict,
     repo_root: Path,
     grindbot_dir: Path,
     console: Console,
+    *,
+    use_sandbox: bool = False,
+    session_id: Optional[str] = None,
+    project_root: Optional[Path] = None,
 ) -> dict:
     """Execute one task in an isolated git worktree.
 
@@ -703,6 +817,9 @@ def execute_task(
         repo_root: Absolute path to the git repository root.
         grindbot_dir: Absolute path to the project's .grindbot/ directory.
         console: Rich console for progress output.
+        use_sandbox: If True, run Gemini in an E2B cloud VM instead of locally.
+        session_id: Optional memory session ID for context.
+        project_root: Optional explicit project root (defaults to repo_root).
 
     Returns:
         Updated task dict with status, branch, and/or error set.
@@ -762,8 +879,20 @@ def execute_task(
                 except OSError:
                     pass
 
+        # Pull memory context for this agent before calling Claude
+        mem_ctx = ""
+        if session_id and project_root:
+            try:
+                mem_ctx = _memory.get_context_for_agent(
+                    "orchestrator", session_id, task, project_root
+                )
+            except Exception:
+                pass
+
         console.print("    [dim]Claude orchestrating task...[/dim]")
-        orchestrated = brain.orchestrate_task(task, file_content=file_preview)
+        orchestrated = brain.orchestrate_task(
+            task, file_content=file_preview, memory_context=mem_ctx
+        )
         if orchestrated:
             prompt = _sanitize_prompt(orchestrated)
             task["prompt_type"] = "orchestrated"
@@ -773,15 +902,40 @@ def execute_task(
             task["prompt_type"] = "static"
             console.print("    [dim]Using static prompt (brain unavailable).[/dim]")
 
-        gem_ok, _, gem_err, gem_model = _call_gemini(
-            prompt, worktree_path, console,
-            system_md_path=system_md_path,
-        )
-        if not gem_ok:
-            console.print(f"    [red]!! Gemini CLI failed:[/red] {gem_err}")
-            task["status"] = "failed"
-            task["error"] = gem_err
-            return task
+        if use_sandbox:
+            from . import sandbox as _sb
+            console.print("    [dim]Running Gemini in E2B sandbox...[/dim]")
+            # Upload the WORKTREE (clean git checkout), not repo_root.
+            # This guarantees the sandbox baseline matches the worktree exactly,
+            # so the returned diff applies cleanly.
+            sb_result = _sb.execute_task_in_sandbox(task, worktree_path, prompt, console)
+            if sb_result.get("stdout"):
+                for line in (sb_result["stdout"] or "").splitlines()[:30]:
+                    console.print(f"    [dim]{line}[/dim]")
+            if not sb_result["success"]:
+                task["status"] = "failed"
+                # stdout is Gemini's actual response; stderr is usually just startup banners
+                err_msg = (sb_result.get("stdout") or sb_result.get("stderr") or
+                           "Sandbox Gemini execution failed")
+                task["error"] = err_msg[:400]
+                return task
+            apply_ok, apply_err = _apply_sandbox_diff(sb_result["diff"], worktree_path, console)
+            if not apply_ok:
+                console.print(f"    [red]!! {apply_err}[/red]")
+                task["status"] = "failed"
+                task["error"] = apply_err
+                return task
+            gem_model = "gemini-2.5-flash"
+        else:
+            gem_ok, _, gem_err, gem_model = _call_gemini(
+                prompt, worktree_path, console,
+                system_md_path=system_md_path,
+            )
+            if not gem_ok:
+                console.print(f"    [red]!! Gemini CLI failed:[/red] {gem_err}")
+                task["status"] = "failed"
+                task["error"] = gem_err
+                return task
 
         # ---- d. Show which files changed -----------------------------------
         changed_preview = wt.get_changed_files(worktree_path)
@@ -851,6 +1005,19 @@ def execute_task(
             task["error"] = result.error
             return task
 
+        # ---- e2. Review diff (Claude sanity-checks before commit) ------
+        _diff_proc = subprocess.run(
+            ["git", "diff"], cwd=worktree_path,
+            capture_output=True, text=True,
+        )
+        _approved, _review_reason = brain.review_diff(task, _diff_proc.stdout or "")
+        if not _approved:
+            console.print(f"    [red]!! Review rejected:[/red] {_review_reason}")
+            task["status"] = "failed"
+            task["error"] = f"Review rejected: {_review_reason}"
+            return task
+        console.print(f"    [dim]Review: {_review_reason}[/dim]")
+
         # ---- f. Commit -----------------------------------------------------
         worker = gem_model if gem_model else "gemini"
         commit_msg = (
@@ -884,19 +1051,48 @@ def execute_task(
         # ---- h. Merge into main (via GitHub PR) ----------------------------
         # Minimize critical section: only actual git merge operations inside the lock.
         with _merge_lock:
-            console.print(f"    [dim]Merging {branch_name} via GitHub PR...[/dim]")
-            merged, merge_err = wt.merge_github_pr(repo_root, branch_name)
-            if not merged:
-                console.print(f"    [red]!! GitHub PR merge failed:[/red] {merge_err}")
-                task["status"] = "failed"
-                task["error"] = f"GitHub PR merge failed: {merge_err}"
-                # GrindBot still expects a local branch to exist for further processing
-                # If the GitHub PR merge failed, the remote branch might still exist.
-                # We retain the local branch here for potential manual recovery or re-attempt.
-                # wt._delete_branch(repo_root, branch_name) # Do not delete branch here
-                return task # Return early on failure inside lock
+            # Step 1: push the task branch to remote
+            console.print(f"    [dim]Pushing {branch_name} to remote...[/dim]")
+            push_ok, push_err = wt.push_branch(repo_root, branch_name)
+            if not push_ok:
+                console.print(f"    [yellow][!] Branch push failed: {push_err}[/yellow]")
 
-            # If merge succeeded, set merge_ok to True and exit the lock naturally
+            # Step 2: create GitHub PR
+            base_branch = wt.get_default_branch(repo_root)
+            pr_title = f"[GrindBot] {title}"
+            pr_body = (
+                f"Automated fix by GrindBot.\n\n"
+                f"Task: {task_id} — {title}\n"
+                f"Severity: {task.get('severity', 'medium')}\n\n"
+                f"{task.get('description', '')[:800]}"
+            )
+            pr_ok, pr_url_or_err = wt.create_github_pr(
+                repo_root, branch_name, pr_title, pr_body, base_branch
+            )
+            if pr_ok:
+                console.print(f"    [dim]PR created: {pr_url_or_err}[/dim]")
+                task["pr_url"] = pr_url_or_err
+                # Extract PR number from URL (e.g. ".../pull/25" → "25") so
+                # gh pr merge doesn't misinterpret "owner/branch" as a fork PR.
+                pr_number = pr_url_or_err.rstrip("/").split("/")[-1]
+                pr_ref = pr_number if pr_number.isdigit() else branch_name
+                # Step 3: merge via gh pr merge
+                console.print(f"    [dim]Merging PR #{pr_ref} via GitHub PR...[/dim]")
+                merged, merge_err = wt.merge_github_pr(repo_root, pr_ref)
+            else:
+                # No gh CLI or no GitHub remote — fall back to local merge
+                console.print(
+                    f"    [yellow][!] GitHub PR creation failed ({pr_url_or_err}),"
+                    " falling back to local merge.[/yellow]"
+                )
+                merged, merge_err = wt.merge_branch(repo_root, branch_name)
+
+            if not merged:
+                console.print(f"    [red]!! Merge failed:[/red] {merge_err}")
+                task["status"] = "failed"
+                task["error"] = f"Merge failed: {merge_err}"
+                return task
+
             merge_ok = True
 
         # Code after the lock (review, second push if approved, record cost)
@@ -980,7 +1176,10 @@ def run_grind(
     console: Console,
     limit: Optional[int] = None,
     dry_run: bool = False,
-) -> list[dict]:
+    workers: int = 1,
+    use_sandbox: bool = False,
+    session_id: Optional[str] = None,
+) -> tuple[list[dict], float, str]:
     """Load pending tasks and execute each one sequentially.
 
     Saves progress to tasks.json after every task so that a crash or
@@ -991,12 +1190,18 @@ def run_grind(
         console: Rich console for all output.
         limit: If set, only execute the first N pending tasks.
         dry_run: If True, show what would run and return without executing.
+        workers: Number of parallel workers (reserved for future use).
+        use_sandbox: If True, run tasks in E2B cloud VMs.
+        session_id: Optional memory session identifier.
 
     Returns:
-        Full updated list of all tasks (completed, failed, and pending).
+        Tuple of (all_tasks, grind_credits, session_id).
     """
     from .config import find_repo_root, load_tasks, save_tasks
     from rich.table import Table
+
+    project_root = grindbot_dir.parent
+    sid = session_id or ""
 
     # --- Load tasks ---------------------------------------------------------
     all_tasks = load_tasks(grindbot_dir.parent)
@@ -1004,14 +1209,19 @@ def run_grind(
         console.print(
             "[yellow]No tasks found. Run [bold]grindbot scan <path>[/bold] first.[/yellow]"
         )
-        return []
+        return [], 0.0, sid
 
-    pending = [t for t in all_tasks if t.get("status") == "pending"]
+    _MAX_TASK_RETRIES = 3
+    pending = [
+        t for t in all_tasks
+        if t.get("status") == "pending"
+        or (t.get("status") == "failed" and t.get("retry_count", 0) < _MAX_TASK_RETRIES)
+    ]
     if not pending:
         console.print(
-            "[yellow]No pending or failed tasks — everything is completed.[/yellow]"
+            "[yellow]No pending or failed tasks — everything is completed or abandoned.[/yellow]"
         )
-        return all_tasks
+        return all_tasks, 0.0, sid
 
     if limit is not None:
         pending = pending[:limit]
@@ -1037,7 +1247,7 @@ def run_grind(
                 t.get("title", ""),
             )
         console.print(table)
-        return all_tasks
+        return all_tasks, 0.0, sid
 
     # --- Locate repo root ---------------------------------------------------
     repo_root = find_repo_root(grindbot_dir)
@@ -1046,7 +1256,7 @@ def run_grind(
             "[red]Cannot locate the git repository root. "
             "Is the project inside a git repo?[/red]"
         )
-        return all_tasks
+        return all_tasks, 0.0, sid
 
     console.print(
         Panel(
@@ -1056,18 +1266,64 @@ def run_grind(
         )
     )
 
+    # --- Open memory session ------------------------------------------------
+    if not sid:
+        try:
+            sid = _memory.open_session(project_root)
+        except Exception:
+            pass
+
     start = time.monotonic()
 
     # --- Execute each pending task ------------------------------------------
     for task in pending:
+        # If this is a retry of a previously failed task, increment the counter
+        # and reset status so execute_task treats it as a fresh run
+        if task.get("status") == "failed":
+            task["retry_count"] = task.get("retry_count", 0) + 1
+            task["status"] = "pending"
+            console.print(
+                f"  [yellow]↩ Retrying task {task.get('id', '?')} "
+                f"(attempt {task['retry_count']}/{_MAX_TASK_RETRIES})...[/yellow]"
+            )
+
         try:
-            updated = execute_task(task, repo_root, grindbot_dir, console)
+            updated = execute_task(
+                task, repo_root, grindbot_dir, console,
+                use_sandbox=use_sandbox,
+                session_id=sid,
+                project_root=project_root,
+            )
         except Exception as exc:
             # Catch-all safety net - the grind loop must never crash
             console.print(f"    [red]!! Unhandled exception:[/red] {exc}")
             task["status"] = "failed"
             task["error"] = f"Unhandled exception: {exc}"
             updated = task
+
+        # Abandon tasks that have burned through all retry attempts
+        if updated.get("status") == "failed":
+            if updated.get("retry_count", 0) >= _MAX_TASK_RETRIES:
+                updated["status"] = "abandoned"
+                console.print(
+                    f"  [red bold]✗ Task {updated.get('id', '?')} abandoned "
+                    f"after {_MAX_TASK_RETRIES} failed attempts.[/red bold]"
+                )
+
+        # Write task outcome to memory world model
+        if sid:
+            try:
+                _memory.update_world_model(sid, project_root, {
+                    "task_outcomes": {
+                        updated.get("id", "?"): {
+                            "status": updated.get("status"),
+                            "title": updated.get("title"),
+                            "failure_reason": updated.get("error"),
+                        }
+                    }
+                })
+            except Exception:
+                pass
 
         # Merge the updated task back into the master list
         for i, t in enumerate(all_tasks):
@@ -1083,7 +1339,15 @@ def run_grind(
 
     elapsed = time.monotonic() - start
     console.print(f"\n[dim]Finished in {elapsed:.1f}s[/dim]")
-    return all_tasks
+
+    # --- Close memory session -----------------------------------------------
+    if sid:
+        try:
+            _memory.close_session(sid, project_root)
+        except Exception:
+            pass
+
+    return all_tasks, 0.0, sid
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1359,7 @@ def retry_tasks(
     task_ids: list[str],
     grindbot_dir: Path,
     console: Console,
+    use_sandbox: bool = False,
 ) -> list[dict]:
     """Reset specific tasks to pending and re-execute them.
 
@@ -1111,6 +1376,7 @@ def retry_tasks(
             Callers are responsible for normalising IDs before calling this.
         grindbot_dir: Absolute path to the project's .grindbot/ directory.
         console: Rich console for all output.
+        use_sandbox: If True, run tasks in E2B cloud VMs.
 
     Returns:
         Full updated list of all tasks after execution.
@@ -1191,7 +1457,10 @@ def retry_tasks(
     # --- Execute each reset task --------------------------------------------
     for task in to_run:
         try:
-            updated = execute_task(task, repo_root, grindbot_dir, console)
+            updated = execute_task(
+                task, repo_root, grindbot_dir, console,
+                use_sandbox=use_sandbox,
+            )
         except Exception as exc:
             console.print(f"    [red]!! Unhandled exception:[/red] {exc}")
             task["status"] = "failed"

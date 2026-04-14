@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from . import brain
+from . import memory as _memory
 from .config import CREDIT_COST_USD, load_prompt_store, save_prompt_store
 
 
@@ -68,14 +69,12 @@ def _get_current_prompts(store: dict) -> dict[str, str]:
         Dict keyed by agent name with the currently active prompt text.
     """
     from . import brain as _brain
-    from . import scanner as _scanner
 
     defaults = {
         "brain_plan": _brain._PLAN_SYSTEM,
         "brain_orchestrate": _brain._ORCHESTRATE_SYSTEM,
         "brain_review_diff": _brain._REVIEW_SYSTEM,
         "brain_review_merge": _brain._MERGE_REVIEW_SYSTEM,
-        "scanner_scan": _scanner._SCAN_PROMPT,
         "executor_task_tool": "TASK: Make one specific code change.",
     }
 
@@ -87,6 +86,7 @@ def run_reflection(
     grindbot_dir: Path,
     tasks: list[dict],
     console: Console,
+    session_id: Optional[str] = None,
 ) -> bool:
     """Run the reflection / prompt-RL step after a grind session.
 
@@ -141,6 +141,7 @@ def run_reflection(
 
     changes: list[dict] = result.get("changes", [])
     reasoning: str = result.get("reasoning", "")
+    belief_diffs: list[dict] = result.get("belief_diffs", [])
 
     if not changes:
         console.print(
@@ -184,6 +185,35 @@ def run_reflection(
 
     # --- 5. Save and display -----------------------------------------------
     save_prompt_store(grindbot_dir, updated_store)
+
+    # --- 6. Apply belief diffs to long-term memory -------------------------
+    if belief_diffs:
+        project_root = grindbot_dir.parent
+        touched_keys: set[str] = set()
+        applied = 0
+        for diff in belief_diffs:
+            agent = diff.get("agent", "")
+            key = diff.get("key", "")
+            if agent and key:
+                try:
+                    if session_id:
+                        diff = {**diff, "session": session_id}
+                    _memory.apply_belief_diffs(agent, [diff], project_root)
+                    touched_keys.add(key)
+                    applied += 1
+                except Exception:
+                    pass
+        if applied:
+            console.print(
+                f"[dim]Memory: {applied} belief(s) written to "
+                f".grindbot/memory/[/dim]"
+            )
+        # Decay stale beliefs and archive those below confidence threshold
+        try:
+            _memory.run_decay_pass(project_root, touched_keys)
+            _memory.archive_decayed_beliefs(project_root)
+        except Exception:
+            pass
 
     _show_reflection(changes, reasoning, iteration, console)
     return True

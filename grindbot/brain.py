@@ -42,30 +42,29 @@ GOOD tasks (prioritize these):
 - Real bugs that cause crashes, data loss, or silent wrong behavior
 - Missing error handling that would break an unattended overnight run
 - Security issues: hardcoded secrets, injection risks, unsafe subprocess use
-- Reliability gaps in the grind loop: retry logic, timeout handling,
-  worktree cleanup on every exit path, graceful degradation on API failures
-- Features that expand autonomy: smarter validation, better task chaining,
-  self-healing on failure
+- Reliability gaps: retry logic, timeout handling, cleanup on every exit path,
+  graceful degradation on API/network failure
 
-BAD tasks (skip entirely):
-- Pure style: variable rename, import reorder, adding type hints to working code
-- Cosmetic refactors with no behavioral impact
-- Speculative performance with no measured bottleneck
-- Docstrings on obvious one-liner functions
+NEVER suggest:
+- Removing, renaming, or changing existing CLI flags or command arguments
+- Adding external dependencies not already present in pyproject.toml / package.json
+- Architectural rewrites or "refactor the entire X" tasks
+- New features that are not already partially implemented
+- Style-only changes: variable renames, import reorder, adding type hints to
+  working code, docstrings on obvious functions
 
-Severity: critical=GrindBot stops working or corrupts git state,
-high=silently wrong behavior, medium=fragile on edge cases,
-low=nice to have but nothing breaks without it.
+Every task MUST reference a specific file path. Tasks without a file are rejected.
 
-Filter: would this task make the morning grind report more valuable
-or just more verbose? If just verbose, skip it.
+Severity: critical=system stops working or corrupts git state,
+high=silently wrong behavior or data loss, medium=fragile on edge cases,
+low=nice to have, nothing breaks without it.
 
 Output a raw JSON array only. No markdown fences. No prose. Start with [.
-Each object must have: category (bug|security|performance|style),
-severity (critical|high|medium|low), file (relative path or null),
-line (integer or null), title (under 80 chars), description (what is wrong
-and exactly how to fix it).
-Return 3-15 real issues.\
+Each object must have: category (bug|security|performance|reliability),
+severity (critical|high|medium|low), file (REQUIRED — relative path, never null),
+line (integer or null), title (under 80 chars), description (state what is wrong
+AND exactly how to fix it — be specific about the change, not just the problem).
+Return 5-12 tasks. Reject any task you cannot attach to a specific file.\
 """
 
 _ORCHESTRATE_SYSTEM = """\
@@ -150,7 +149,7 @@ _REFLECT_TIMEOUT = 120
 
 _REFLECT_SYSTEM = """\
 You are GrindBot's self-improvement engine. After each grind session you review
-all task outcomes and improve the prompt templates used by each agent in the pipeline.
+all task outcomes, improve prompt templates, and extract reusable beliefs for future sessions.
 
 Agents and their prompt keys:
 - brain_plan: Claude scans codebase and creates task list
@@ -160,10 +159,15 @@ Agents and their prompt keys:
 - scanner_scan: Gemini scans codebase for issues
 - executor_task_tool: Fallback Gemini task prompt when Claude is unavailable
 
+Agent names for beliefs:
+- orchestrator, executor, reviewer, scanner, merge, reflector
+
 Rules:
 - Only modify prompts that clearly contributed to failures. Do not change working prompts.
 - Make surgical improvements - not rewrites. Preserve all safety constraints.
-- If a session had 100% success rate, return an empty changes list.
+- If a session had 100% success rate, return empty changes and belief_diffs lists.
+- Beliefs should be concrete, actionable facts the agent can use next session.
+- Belief confidence: 0.9=certain, 0.7=likely, 0.5=hypothesis.
 - Output ONLY valid JSON. No prose before or after.
 
 Output format:
@@ -174,6 +178,16 @@ Output format:
       "agent": "brain_orchestrate",
       "reason": "Short explanation of why this prompt contributed to failures",
       "new_prompt": "Complete updated prompt text"
+    }
+  ],
+  "belief_diffs": [
+    {
+      "agent": "executor",
+      "action": "add",
+      "key": "short-kebab-case-identifier",
+      "belief": "Concrete actionable fact learned this session",
+      "confidence": 0.8,
+      "relevant_to": ["orchestrator"]
     }
   ]
 }\
@@ -351,11 +365,18 @@ def plan_tasks(
     Raises:
         RuntimeError if KIE_API_KEY is not set or the API call fails hard.
     """
-    user_msg = source_context
+    # Goal goes before source context so it frames Claude's reading
+    goal_prefix = ""
     if goal:
-        user_msg += f"\n\n--- USER GOAL ---\n{goal}"
-    user_msg += (
-        "\n\n--- INSTRUCTIONS ---\n"
+        goal_prefix = (
+            f"IMPROVEMENT GOAL: {goal}\n"
+            f"Prioritize tasks that directly advance this goal.\n\n"
+        )
+
+    user_msg = (
+        goal_prefix
+        + source_context
+        + "\n\n--- INSTRUCTIONS ---\n"
         "Analyze the code above. Return a JSON array of tasks. "
         "Begin your response with [ and end with ]."
     )
@@ -394,6 +415,7 @@ def plan_tasks(
 def orchestrate_task(
     task: dict[str, Any],
     file_content: str | None = None,
+    memory_context: str = "",
 ) -> str | None:
     """Write a precise Gemini prompt for a single task.
 
@@ -407,6 +429,9 @@ def orchestrate_task(
     Args:
         task: Task dict with title, description, severity, category, file.
         file_content: Current content of the target file, or None if unknown.
+        memory_context: Formatted memory context string from memory.get_context_for_agent(),
+            or "" if no memory is available. Prepended to the user message so Claude
+            can factor in lessons from previous tasks and sessions.
 
     Returns:
         Plain-text prompt string for Gemini, or None on failure/unavailability.
@@ -424,13 +449,16 @@ def orchestrate_task(
         if len(file_content) > _MAX_FILE_PREVIEW:
             preview += f"\n... (truncated at {_MAX_FILE_PREVIEW} chars)"
 
+    mem_section = f"\n\n{memory_context}" if memory_context else ""
+
     user_msg = (
         f"TASK TITLE: {task.get('title', '')}\n"
         f"FILE: {file_hint}\n"
         f"SEVERITY: {task.get('severity', 'medium')}\n"
         f"CATEGORY: {task.get('category', 'improvement')}\n"
         f"DESCRIPTION: {task.get('description', '')}"
-        f"{preview}\n\n"
+        f"{preview}"
+        f"{mem_section}\n\n"
         "Write the Gemini agent instructions now."
     )
 

@@ -147,7 +147,14 @@ def scan(path: str, goal: str) -> None:
     show_default=True,
     help="Number of tasks to run in parallel.",
 )
-def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int) -> None:
+@click.option(
+    "--sandbox",
+    "use_sandbox",
+    is_flag=True,
+    default=False,
+    help="Run tasks in E2B cloud VMs instead of local worktrees.",
+)
+def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int, use_sandbox: bool) -> None:
     """Execute pending tasks autonomously, each in its own git worktree."""
     from . import brain, config, reporter, scanner
     from . import executor
@@ -180,13 +187,19 @@ def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int)
     scanner.load_prompt_overrides(store)
     executor.load_prompt_overrides(store)
 
-    tasks = run_grind(grindbot_dir, console, limit=limit, dry_run=dry_run, workers=workers)
+    if use_sandbox:
+        console.print("[bold cyan]Sandbox mode:[/bold cyan] tasks will run in E2B cloud VMs.")
+
+    tasks, grind_credits, session_id = run_grind(
+        grindbot_dir, console, limit=limit, dry_run=dry_run,
+        workers=workers, use_sandbox=use_sandbox,
+    )
     if not dry_run:
         reporter.show_grind_report(tasks, str(grindbot_dir.parent))
 
         if not no_reflect and tasks:
             console.rule("[bold cyan]Reflection Loop[/bold cyan]")
-            reflector.run_reflection(grindbot_dir, tasks, console)
+            reflector.run_reflection(grindbot_dir, tasks, console, session_id=session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +245,14 @@ def _normalise_id(raw: str) -> str:
     show_default=True,
     help="Project root to search for .grindbot/ directory.",
 )
-def retry(ids: tuple[str, ...], all_failed: bool, reset_only: bool, path: Path) -> None:
+@click.option(
+    "--sandbox",
+    "use_sandbox",
+    is_flag=True,
+    default=False,
+    help="Run retried tasks in E2B cloud VMs instead of local worktrees.",
+)
+def retry(ids: tuple[str, ...], all_failed: bool, reset_only: bool, path: Path, use_sandbox: bool) -> None:
     """Reset failed or completed tasks and re-run them.
 
     \b
@@ -320,7 +340,9 @@ def retry(ids: tuple[str, ...], all_failed: bool, reset_only: bool, path: Path) 
         return
 
     # --- Full retry: reset + execute ----------------------------------------
-    tasks = retry_tasks(target_ids, grindbot_dir, console)
+    if use_sandbox:
+        console.print("[bold cyan]Sandbox mode:[/bold cyan] tasks will run in E2B cloud VMs.")
+    tasks = retry_tasks(target_ids, grindbot_dir, console, use_sandbox=use_sandbox)
     reporter.show_grind_report(tasks, str(grindbot_dir.parent))
 
 
@@ -385,7 +407,7 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
     """Run grind → reflect → rescan in a continuous loop."""
     import time
     from rich.panel import Panel
-    from . import config, executor, planner, reflector, scanner
+    from . import brain, config, executor, planner, reflector, scanner
     from .brain import plan_tasks
 
     resolved_path = Path(path).resolve()
@@ -412,14 +434,15 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
             cycle += 1
             console.rule(f"[bold]Cycle {cycle}[/bold]")
 
-            # 1. Grind pending tasks
-            tasks = executor.run_grind(grindbot_dir, console, workers=workers)
+            # 1. Grind pending tasks (reset credits first so we can read grind cost)
+            brain.reset_task_credits()
+            tasks, _, session_id = executor.run_grind(grindbot_dir, console, workers=workers)
+            cycle_credits = brain.get_task_credits()
 
-            # 2. Prompt RL reflection
-            reflector.run_reflection(grindbot_dir, tasks, console)
+            # 2. Prompt RL reflection (resets/reads its own credits internally)
+            reflector.run_reflection(grindbot_dir, tasks, console, session_id=session_id)
 
-            # 3. Budget check (use credits recorded on tasks)
-            cycle_credits = sum(t.get("credits", 0.0) for t in tasks)
+            # 3. Budget check
             cycle_usd = cycle_credits * config.CREDIT_COST_USD
             total_usd += cycle_usd
             console.print(f"  [dim]Cycle cost: ${cycle_usd:.4f}  Total: ${total_usd:.4f}[/dim]")
@@ -441,11 +464,7 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
                 else:
                     console.print("  [dim]No new tasks found.[/dim]")
             except RuntimeError as exc:
-                console.print(
-                    f'[yellow]Re-scan failed: {exc} '
-                    f'-- will retry next cycle[/yellow]'
-                )
-                continue
+                console.print(f"  [yellow][!] Re-scan failed (skipping): {exc}[/yellow]")
 
             # 5. Sleep
             console.print(f"  [dim]Next cycle in {interval}s — Ctrl+C to stop.[/dim]")

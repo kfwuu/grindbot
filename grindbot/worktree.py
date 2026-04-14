@@ -428,7 +428,7 @@ def create_github_pr(
 
 def merge_github_pr(
     repo_root: Path,
-    branch_name: str,
+    pr_ref: str,
 ) -> tuple[bool, Optional[str]]:
     """Merge a GitHub pull request using the gh CLI (squash merge).
 
@@ -436,13 +436,15 @@ def merge_github_pr(
 
     Args:
         repo_root: Absolute path to the git repository root.
-        branch_name: The PR head branch name.
+        pr_ref: PR number (e.g. "25") or branch name as fallback.
+            Using a PR number avoids gh CLI misinterpreting
+            "owner/branch" style names as fork PRs.
 
     Returns:
         (True, None) on success, (False, error_message) on failure.
     """
     result = subprocess.run(
-        ["gh", "pr", "merge", branch_name, "--squash", "--delete-branch"],
+        ["gh", "pr", "merge", pr_ref, "--squash", "--delete-branch"],
         cwd=str(repo_root),
         capture_output=True,
         text=True,

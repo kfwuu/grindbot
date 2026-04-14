@@ -9,6 +9,9 @@ from rich.console import Console
 
 console = Console()
 
+# Cost per Kie.ai credit in USD (used for display-only spend tracking)
+CREDIT_COST_USD: float = 0.0001
+
 
 # ---------------------------------------------------------------------------
 # Dependency checks
