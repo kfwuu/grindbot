@@ -1108,7 +1108,15 @@ def execute_task(
             default_branch = wt.get_default_branch(repo_root)
             try:
                 subprocess.run(
-                    ["git", "pull", "origin", default_branch],
+                    ["git", "fetch", "origin"],
+                    cwd=str(repo_root),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    ["git", "reset", "--hard",
+                     f'origin/{default_branch}'],
                     cwd=str(repo_root),
                     check=True,
                     capture_output=True,
