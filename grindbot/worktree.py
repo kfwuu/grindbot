@@ -244,24 +244,24 @@ def merge_branch(
                 capture_output=True,
                 text=True,
             )
-            if pop_result.returncode != 0:
-                pop_err = pop_result.stderr.strip()
-                return (
-                    True,
-                    'Merge succeeded but stash pop failed'
-                    ' (your WIP is still in the stash): '
-                    + pop_err,
-                )
         err = result.stderr.strip() or result.stdout.strip() or "git merge failed"
         return False, err
 
     if stashed:
-        subprocess.run(
+        pop_result = subprocess.run(
             ["git", "stash", "pop"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
         )
+        if pop_result.returncode != 0:
+            pop_err = pop_result.stderr.strip()
+            return (
+                True,
+                'Merge succeeded but stash pop failed'
+                ' (your WIP is still in the stash): '
+                + pop_err,
+            )
 
     return True, None
 
