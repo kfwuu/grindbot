@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -212,6 +213,8 @@ def load_prompt_overrides(store: dict) -> None:
     _PROMPT_OVERRIDES = store.get("prompts", {})
 
 _cached_api_key: str | None = None # Added for in-memory caching
+_cached_api_key_time = 0.0
+_API_KEY_TTL = 300  # re-read ~/.env every 5 minutes
 
 def _get_prompt(key: str, default: str) -> str:
     """Return evolved prompt override if available, else the hardcoded default.
@@ -232,13 +235,16 @@ def _get_api_key() -> str | None:
     Python does not auto-load ~/.env the way Gemini CLI does, so we
     check the file directly and cache the result into os.environ.
     """
-    global _cached_api_key
+    global _cached_api_key, _cached_api_key_time
     if _cached_api_key is not None:
-        return _cached_api_key
+        if (time.monotonic() - _cached_api_key_time) < _API_KEY_TTL:
+            return _cached_api_key
+        _cached_api_key = None
 
     key = os.environ.get("KIE_API_KEY", "").strip()
     if key:
         _cached_api_key = key
+        _cached_api_key_time = time.monotonic()
         return key
 
     from pathlib import Path
@@ -263,6 +269,7 @@ def _get_api_key() -> str | None:
                     key = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if key:
                         _cached_api_key = key # Cache in module variable, not os.environ
+                        _cached_api_key_time = time.monotonic()
                         return key
         except OSError:
             pass
