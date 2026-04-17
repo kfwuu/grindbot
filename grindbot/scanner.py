@@ -151,3 +151,7 @@ def _collect_source_files(project_path: Path) -> str:
         + f"[/dim]"
     )
     return "\n".join(parts)
+
+
+collect_source_files = _collect_source_files
+
