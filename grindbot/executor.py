@@ -533,6 +533,10 @@ def _run_tool_mode(
             pass
         return -1, ""
     except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
         return -2, ""
 
 
