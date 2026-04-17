@@ -534,7 +534,8 @@ def _run_tool_mode(
         except Exception:
             pass
         return -1, ""
-    except Exception:
+    except Exception as exc:
+        console.print(f"[red]Gemini process error: {exc}[/red]")
         try:
             proc.kill()
         except Exception:
