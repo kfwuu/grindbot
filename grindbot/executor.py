@@ -1091,6 +1091,14 @@ def execute_task(
                 console.print(f"    [red]!! Merge failed:[/red] {merge_err}")
                 task["status"] = "failed"
                 task["error"] = f"Merge failed: {merge_err}"
+                try:
+                    wt.close_github_pr(repo_root, branch_name)
+                except Exception:
+                    pass
+                try:
+                    wt._delete_branch(repo_root, branch_name)
+                except Exception:
+                    pass
                 return task
 
             merge_ok = True
