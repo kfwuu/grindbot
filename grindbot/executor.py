@@ -1348,10 +1348,11 @@ def run_grind(
                 break
 
         # Persist after every task
-        try:
-            save_tasks(grindbot_dir.parent, all_tasks)
-        except Exception as exc:
-            console.print(f"  [yellow][!] Could not save tasks.json:[/yellow] {exc}")
+        with _merge_lock:
+            try:
+                save_tasks(grindbot_dir.parent, all_tasks)
+            except Exception as exc:
+                console.print(f"  [yellow][!] Could not save tasks.json:[/yellow] {exc}")
 
     elapsed = time.monotonic() - start
     console.print(f"\n[dim]Finished in {elapsed:.1f}s[/dim]")
@@ -1444,12 +1445,13 @@ def retry_tasks(
         console.print("[yellow]No tasks eligible for retry.[/yellow]")
         return all_tasks
 
-    # Persist the resets before executing so a crash doesn't leave stale state.
-    try:
-        save_tasks(grindbot_dir.parent, all_tasks)
-    except Exception as exc:
-        console.print(f"[red]!! Could not save tasks.json before retry: {exc}[/red]")
-        return all_tasks
+    # Persist the resets before executing so a crash doesn\'t leave stale state.
+    with _merge_lock:
+        try:
+            save_tasks(grindbot_dir.parent, all_tasks)
+        except Exception as exc:
+            console.print(f"[red]!! Could not save tasks.json before retry: {exc}[/red]")
+            return all_tasks
 
     # --- Locate repo root ---------------------------------------------------
     repo_root = find_repo_root(grindbot_dir)
@@ -1488,10 +1490,11 @@ def retry_tasks(
                 all_tasks[i] = updated
                 break
 
-        try:
-            save_tasks(grindbot_dir.parent, all_tasks)
-        except Exception as exc:
-            console.print(f"  [yellow][!] Could not save tasks.json:[/yellow] {exc}")
+        with _merge_lock:
+            try:
+                save_tasks(grindbot_dir.parent, all_tasks)
+            except Exception as exc:
+                console.print(f"  [yellow][!] Could not save tasks.json:[/yellow] {exc}")
 
     elapsed = time.monotonic() - start
     console.print(f"\n[dim]Retry finished in {elapsed:.1f}s[/dim]")
