@@ -840,10 +840,9 @@ def execute_task(
             f'[yellow]Skipping task {task.get("id", "?")}:'
             f' file is in .grindbot/ignore[/yellow]'
         )
-        return {
-            'status': 'skipped',
-            'reason': 'file is in .grindbot/ignore',
-        }
+        task['status'] = 'skipped'
+        task['error'] = 'file is in .grindbot/ignore'
+        return task
 
     # ---- a. Create worktree ------------------------------------------------
     wt_ok, wt_err = wt.create_worktree(repo_root, branch_name, worktree_path)
