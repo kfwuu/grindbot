@@ -10,6 +10,7 @@ Checks (in order):
 import ast
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -101,6 +102,7 @@ def _get_changed_files(worktree_path: Path) -> list[str]:
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     files: list[str] = []
     for line in result.stdout.splitlines():
@@ -172,6 +174,7 @@ def _check_pyrefly(
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=60,
         )
     except (subprocess.TimeoutExpired, Exception):
@@ -200,10 +203,11 @@ def _check_tests(
     # Check pytest availability
     try:
         pytest_check = subprocess.run(
-            ["python", "-m", "pytest", "--version"],
+            [sys.executable, "-m", "pytest", "--version"],
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
     except (FileNotFoundError, OSError):
         return True, None, "Tests skipped - python executable not found on PATH"
@@ -226,10 +230,11 @@ def _check_tests(
         env = os.environ.copy()
         env['PYTHONPATH'] = str(worktree_path)
         result = subprocess.run(
-            ['python', '-m', 'pytest', '-q', '--tb=short', '--no-header'],
+            [sys.executable, '-m', 'pytest', '-q', '--tb=short', '--no-header'],
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=120,
             env=env,
         )

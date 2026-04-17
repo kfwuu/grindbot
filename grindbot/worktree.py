@@ -44,6 +44,7 @@ def create_worktree(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
     result = subprocess.run(
@@ -51,6 +52,7 @@ def create_worktree(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
     if result.returncode != 0:
@@ -69,6 +71,7 @@ def create_worktree(
                 cwd=str(repo_root),
                 capture_output=True,
                 text=True,
+        encoding="utf-8",
             )
             if retry.returncode != 0:
                 return False, retry.stderr.strip() or "git worktree add failed on retry"
@@ -98,6 +101,7 @@ def commit_worktree(
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if add.returncode != 0:
         return False, add.stderr.strip() or "git add -A failed"
@@ -108,6 +112,7 @@ def commit_worktree(
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if commit.returncode != 0:
         stderr = commit.stderr.strip()
@@ -137,6 +142,7 @@ def remove_worktree(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         return False, result.stderr.strip() or "git worktree remove failed"
@@ -200,6 +206,7 @@ def merge_branch(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if default_branch_result.returncode != 0:
         return (
@@ -221,6 +228,7 @@ def merge_branch(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     stashed = "No local changes" not in stash_result.stdout
 
@@ -229,6 +237,7 @@ def merge_branch(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         subprocess.run(
@@ -236,14 +245,27 @@ def merge_branch(
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+        encoding="utf-8",
         )
         if stashed:
-            subprocess.run(["git", "stash", "pop"], cwd=str(repo_root), capture_output=True, text=True)
+            subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
         err = result.stderr.strip() or result.stdout.strip() or "git merge failed"
         return False, err
 
     if stashed:
-        pop_result = subprocess.run(["git", "stash", "pop"], cwd=str(repo_root), capture_output=True, text=True)
+        pop_result = subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
         if pop_result.returncode != 0:
             return True, pop_result.stderr.strip() or "git stash pop failed" 
 
@@ -267,6 +289,7 @@ def get_changed_files(worktree_path: Path) -> list[str]:
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     files: list[str] = []
     for line in result.stdout.splitlines():
@@ -294,6 +317,7 @@ def get_diff(worktree_path: Path) -> str:
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     diff = diff_result.stdout
 
@@ -303,6 +327,7 @@ def get_diff(worktree_path: Path) -> str:
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     new_files = [
         line[3:].strip()
@@ -329,6 +354,7 @@ def get_default_branch(repo_root: Path) -> str:
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     branch = result.stdout.strip()
     return branch if branch else "master"
@@ -359,6 +385,7 @@ def push_branch(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if check.returncode != 0:
         return True, None  # No remote - silently skip, not an error
@@ -368,10 +395,74 @@ def push_branch(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         return False, result.stderr.strip() or "git push failed"
     return True, None
+
+
+def sync_from_remote(repo_root: Path, remote: str = "origin") -> tuple[bool, int, str]:
+    """Fetch and rebase the default branch from origin.
+
+    Keeps linear history compatible with worktree-based workflows.
+    No-ops silently if no remote is configured.
+
+    Args:
+        repo_root: Absolute path to the git repository root.
+        remote: Remote name (default 'origin').
+
+    Returns:
+        (success, commits_pulled, error_msg). commits_pulled is 0 on no-op.
+    """
+    # Check remote exists
+    check = subprocess.run(
+        ["git", "remote", "get-url", remote],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if check.returncode != 0:
+        return True, 0, ""  # No remote — silently skip
+
+    fetch = subprocess.run(
+        ["git", "fetch", remote],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if fetch.returncode != 0:
+        return False, 0, fetch.stderr.strip() or "git fetch failed"
+
+    default_branch = get_default_branch(repo_root)
+
+    pull = subprocess.run(
+        ["git", "pull", "--rebase", "--autostash", remote, default_branch],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if pull.returncode != 0:
+        return False, 0, pull.stderr.strip() or "git pull --rebase failed"
+
+    # Count commits pulled from output like "1 file changed" or "Already up to date."
+    output = pull.stdout + pull.stderr
+    if "Already up to date" in output or "Current branch" in output:
+        return True, 0, ""
+
+    # Parse "Fast-forwarded ... to ..." or count lines like "Updating abc..def"
+    commits_pulled = 0
+    import re as _re
+    m = _re.search(r"(\d+)\s+commit", output)
+    if m:
+        commits_pulled = int(m.group(1))
+    elif "Updating" in output:
+        commits_pulled = 1  # At least one commit landed
+
+    return True, commits_pulled, ""
 
 
 def create_github_pr(
@@ -404,6 +495,7 @@ def create_github_pr(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         return False, result.stderr.strip() or "gh pr create failed"
@@ -432,6 +524,7 @@ def merge_github_pr(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         err = result.stderr.strip() or result.stdout.strip() or "gh pr merge failed"
@@ -460,6 +553,7 @@ def close_github_pr(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     # Best-effort: delete the remote branch regardless of PR close result
     subprocess.run(
@@ -467,6 +561,7 @@ def close_github_pr(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         return False, result.stderr.strip() or "gh pr close failed"
@@ -494,6 +589,7 @@ def revert_last_commit(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         return False, result.stderr.strip() or "git revert HEAD failed"
@@ -521,6 +617,7 @@ def get_head_diff(repo_root: Path) -> str:
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return result.stdout if result.returncode == 0 else ""
 
@@ -543,6 +640,7 @@ def get_branch_diff(repo_root: Path, branch_name: str) -> str:
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return result.stdout if result.returncode == 0 else ""
 
@@ -573,6 +671,7 @@ def _delete_branch(
         cwd=str(repo_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         return False, result.stderr.strip() or "git branch -D failed"

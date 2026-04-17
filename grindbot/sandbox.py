@@ -70,17 +70,17 @@ def execute_task_in_sandbox(
     except ImportError:
         return _fail("e2b package not installed — run: pip install e2b")
 
-    _load_env_file()
+    env_vals = _load_env_file()
 
-    api_key = os.environ.get("E2B_API_KEY", "").strip()
+    api_key = env_vals.get("E2B_API_KEY", "")
     if not api_key:
         return _fail("E2B_API_KEY not set — add it to ~/.env")
 
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    gemini_key = env_vals.get("GEMINI_API_KEY", "")
     if not gemini_key:
         return _fail("GEMINI_API_KEY not set — add it to ~/.env")
 
-    template = os.environ.get(_TEMPLATE_ID_ENV, _DEFAULT_TEMPLATE).strip()
+    template = env_vals.get(_TEMPLATE_ID_ENV, _DEFAULT_TEMPLATE)
 
     sandbox: Any = None
     try:
@@ -215,13 +215,25 @@ def _tar_repo(repo_root: Path) -> bytes:
     return buf.getvalue()
 
 
-def _load_env_file() -> None:
-    """Load E2B_API_KEY, GEMINI_API_KEY, and E2B_TEMPLATE_ID from ~/.env if not
-    already in the environment.  Mirrors the pattern used in brain.py for KIE_API_KEY."""
+def _load_env_file() -> dict[str, str]:
+    """Read E2B_API_KEY, GEMINI_API_KEY, and E2B_TEMPLATE_ID from ~/.env.
+
+    Returns a dict of found values without touching os.environ, so keys
+    do not leak into child processes for the rest of the process lifetime.
+    Keys already set in the environment are included via os.environ as fallback.
+    """
+    _WANTED = {"E2B_API_KEY", "GEMINI_API_KEY", _TEMPLATE_ID_ENV}
+    result: dict[str, str] = {}
+
+    # Seed from environment first so shell-exported vars work without a file
+    for key in _WANTED:
+        val = os.environ.get(key, "").strip()
+        if val:
+            result[key] = val
+
     env_file = Path.home() / ".env"
     if not env_file.exists():
-        return
-    _WANTED = {"E2B_API_KEY", "GEMINI_API_KEY", _TEMPLATE_ID_ENV}
+        return result
     try:
         for line in env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -229,10 +241,11 @@ def _load_env_file() -> None:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
-            if key in _WANTED and not os.environ.get(key, "").strip():
-                os.environ[key] = val.strip().strip('"').strip("'")
+            if key in _WANTED:
+                result[key] = val.strip().strip('"').strip("'")
     except OSError:
         pass
+    return result
 
 
 def _sanitize(text: str, *secrets: str) -> str:

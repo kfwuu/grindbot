@@ -704,9 +704,9 @@ def reflect_session(session_data: dict, current_prompts: dict) -> dict | None:
 
     user_msg = (
         "SESSION OUTCOMES:\n"
-        + json.dumps(session_data, indent=2)
+        + json.dumps(session_data)
         + "\n\nCURRENT PROMPT TEMPLATES:\n"
-        + json.dumps(current_prompts, indent=2)
+        + json.dumps(current_prompts)
     )
 
     try:

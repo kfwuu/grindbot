@@ -1,4 +1,5 @@
 """GrindBot CLI — entry point with scan, grind, report, and init commands."""
+import json
 import sys
 from pathlib import Path
 
@@ -50,7 +51,7 @@ def scan(path: str, goal: str) -> None:
     """Analyze a codebase with Claude Opus 4.6 and generate a prioritized task list."""
     from pathlib import Path as _Path
     from . import brain, config, planner, reporter
-    from .scanner import collect_source_files, _detect_languages
+    from .scanner import _collect_source_files as collect_source_files, _detect_languages
 
     if not brain._get_api_key():
         console.print(
@@ -154,7 +155,14 @@ def scan(path: str, goal: str) -> None:
     default=False,
     help="Run tasks in E2B cloud VMs instead of local worktrees.",
 )
-def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int, use_sandbox: bool) -> None:
+@click.option(
+    "--no-sync",
+    "no_sync",
+    is_flag=True,
+    default=False,
+    help="Skip git fetch/rebase from origin before grinding.",
+)
+def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int, use_sandbox: bool, no_sync: bool) -> None:
     """Execute pending tasks autonomously, each in its own git worktree."""
     from . import brain, config, reporter, scanner
     from . import executor
@@ -177,12 +185,6 @@ def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int,
 
     # Load prompt store and inject evolved overrides before grind starts.
     store = load_prompt_store(grindbot_dir)
-    if store.get("prompts"):
-        iteration = store.get("iteration", "?")
-        console.print(
-            f"[dim]Loaded evolved prompts from .grindbot/prompts.json "
-            f"(iteration {iteration})[/dim]"
-        )
     brain.load_prompt_overrides(store)
     scanner.load_prompt_overrides(store)
     executor.load_prompt_overrides(store)
@@ -192,7 +194,7 @@ def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int,
 
     tasks, grind_credits, session_id = run_grind(
         grindbot_dir, console, limit=limit, dry_run=dry_run,
-        workers=workers, use_sandbox=use_sandbox,
+        workers=workers, use_sandbox=use_sandbox, auto_sync=not no_sync,
     )
     if not dry_run:
         reporter.show_grind_report(tasks, str(grindbot_dir.parent))
@@ -370,6 +372,102 @@ def report(path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# push
+# ---------------------------------------------------------------------------
+
+
+@main.command("push")
+@click.argument("files", nargs=-1)
+@click.option(
+    "--message", "-m",
+    default=None,
+    help="Commit message (auto-generated from changed file names if omitted).",
+)
+@click.option(
+    "--path",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+    show_default=True,
+    help="Project root to find the git repository.",
+)
+def push_cmd(files: tuple[str, ...], message: str, path: Path) -> None:
+    """Stage, commit, and push grindbot source changes to origin.
+
+    \b
+    Examples:
+      grindbot push grindbot/reflector.py grindbot/brain.py
+      grindbot push -m "perf: cut reflect cost"
+      grindbot push                     # stages all modified grindbot/*.py
+    """
+    import subprocess as _sp
+    from . import worktree as wt
+
+    repo_root = path.resolve()
+
+    # Resolve files to stage: explicit list or fall back to modified grindbot/*.py
+    if files:
+        to_stage = list(files)
+    else:
+        status = _sp.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+        modified = [
+            line[3:].strip()
+            for line in status.stdout.splitlines()
+            if line.strip() and "grindbot/" in line[3:]
+        ]
+        if not modified:
+            console.print("[yellow]No modified grindbot/ files to push.[/yellow]")
+            return
+        to_stage = modified
+
+    # Stage
+    add = _sp.run(
+        ["git", "add"] + to_stage,
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if add.returncode != 0:
+        console.print(f"[red]git add failed:[/red] {add.stderr.strip()}")
+        return
+
+    # Auto-generate commit message from file names if not provided
+    if not message:
+        basenames = ", ".join(Path(f).name for f in to_stage)
+        message = f"chore: update {basenames}"
+
+    # Commit
+    commit = _sp.run(
+        ["git", "commit", "-m", message],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if commit.returncode != 0:
+        stderr = commit.stderr.strip() + commit.stdout.strip()
+        if "nothing to commit" in stderr:
+            console.print("[yellow]Nothing to commit — working tree is clean.[/yellow]")
+            return
+        console.print(f"[red]git commit failed:[/red] {commit.stderr.strip()}")
+        return
+
+    console.print(f"[green]Committed:[/green] {message}")
+
+    # Push via worktree.push_branch (respects no-remote guard)
+    default_branch = wt.get_default_branch(repo_root)
+    ok, err = wt.push_branch(repo_root, default_branch)
+    if not ok:
+        console.print(f"[red]git push failed:[/red] {err}")
+        return
+
+    console.print(f"[green]Pushed[/green] {default_branch} to origin.")
+
+
+# ---------------------------------------------------------------------------
 # daemon
 # ---------------------------------------------------------------------------
 
@@ -403,7 +501,14 @@ def report(path: str) -> None:
     default=None,
     help="Stop after spending this many USD (cumulative).",
 )
-def daemon(path: str, workers: int, interval: int, budget: float) -> None:
+@click.option(
+    "--no-sync",
+    "no_sync",
+    is_flag=True,
+    default=False,
+    help="Skip git fetch/rebase from origin at the start of each cycle.",
+)
+def daemon(path: str, workers: int, interval: int, budget: float, no_sync: bool) -> None:
     """Run grind → reflect → rescan in a continuous loop."""
     import time
     from rich.panel import Panel
@@ -423,6 +528,20 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
     total_usd = 0.0
     cycle = 0
 
+    # Resume accumulated spend from a previous run so --budget is reliable across restarts.
+    state_file = grindbot_dir / "daemon-state.json"
+    if state_file.exists():
+        try:
+            _saved = json.loads(state_file.read_text())
+            total_usd = float(_saved.get("total_usd", 0.0))
+            cycle = int(_saved.get("cycle_count", 0))
+            console.print(
+                f"[dim]Resumed daemon state: ${total_usd:.4f} spent, "
+                f"{cycle} cycle(s) completed previously.[/dim]"
+            )
+        except Exception as _exc:
+            console.print(f"[yellow][!] Could not load daemon-state.json ({_exc}) — starting fresh.[/yellow]")
+
     console.print(Panel(
         f"[bold green]Daemon started[/bold green]  workers={workers}  interval={interval}s"
         + (f"  budget=${budget:.2f}" if budget else "  no budget cap"),
@@ -436,7 +555,9 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
 
             # 1. Grind pending tasks (reset credits first so we can read grind cost)
             brain.reset_task_credits()
-            tasks, _, session_id = executor.run_grind(grindbot_dir, console, workers=workers)
+            tasks, _, session_id = executor.run_grind(
+                grindbot_dir, console, workers=workers, auto_sync=not no_sync,
+            )
             cycle_credits = brain.get_task_credits()
 
             # 2. Prompt RL reflection (resets/reads its own credits internally)
@@ -446,6 +567,18 @@ def daemon(path: str, workers: int, interval: int, budget: float) -> None:
             cycle_usd = cycle_credits * config.CREDIT_COST_USD
             total_usd += cycle_usd
             console.print(f"  [dim]Cycle cost: ${cycle_usd:.4f}  Total: ${total_usd:.4f}[/dim]")
+
+            # Persist state so budget enforcement survives daemon restarts.
+            try:
+                import datetime
+                state_file.write_text(json.dumps({
+                    "total_usd": total_usd,
+                    "cycle_count": cycle,
+                    "last_cycle_ts": datetime.datetime.utcnow().isoformat(),
+                }, indent=2))
+            except Exception as _exc:
+                console.print(f"[yellow][!] Could not save daemon-state.json ({_exc})[/yellow]")
+
             if budget and total_usd >= budget:
                 console.print(f"[yellow]Budget ${budget:.2f} reached — daemon stopping.[/yellow]")
                 break

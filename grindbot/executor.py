@@ -404,6 +404,7 @@ def _run_single_file(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             env=env,
         )
         stdin_fh.close()
@@ -488,6 +489,7 @@ def _run_tool_mode(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             env=env,
         )
 
@@ -542,6 +544,8 @@ def _run_tool_mode(
 
 _RATE_LIMIT_PHRASES = ("429", "rate limit", "quota exceeded", "resource exhausted", "too many requests")
 _RATE_LIMIT_DELAYS = (30, 60, 120)  # seconds — exponential backoff sleep durations
+
+_SYNTAX_FIX_MAX_RETRIES = 1  # Max times to re-prompt Gemini to fix its own syntax errors
 
 
 def _is_rate_limited(text: str) -> bool:
@@ -769,6 +773,7 @@ def _apply_sandbox_diff(diff: str, worktree_path: Path, console: Console) -> tup
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode == 0:
         return True, ""
@@ -779,6 +784,7 @@ def _apply_sandbox_diff(diff: str, worktree_path: Path, console: Console) -> tup
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result2.returncode == 0:
         return True, ""
@@ -789,6 +795,7 @@ def _apply_sandbox_diff(diff: str, worktree_path: Path, console: Console) -> tup
         cwd=str(worktree_path),
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result3.returncode == 0:
         return True, ""
@@ -1003,15 +1010,55 @@ def execute_task(
                 console.print(f"    [yellow][!][/yellow] {w}")
 
         if not result.success:
-            console.print(f"    [red]!! Validation failed:[/red] {result.error}")
-            task["status"] = "failed"
-            task["error"] = result.error
-            return task
+            # --- Syntax-error self-heal: give Gemini one chance to fix its own mistake ---
+            if (
+                result.error
+                and result.error.startswith("Syntax error in")
+                and _SYNTAX_FIX_MAX_RETRIES > 0
+            ):
+                console.print(
+                    f"    [yellow][!] Syntax error detected — asking Gemini to fix it (1 retry)...[/yellow]"
+                )
+                fix_prompt = (
+                    f"SYNTAX ERROR — fix only this, do not change anything else:\n\n"
+                    f"{result.error}\n\n"
+                    f"Open the file, find line mentioned above, fix the syntax error, save. "
+                    f"Do not refactor, do not add features, do not touch other lines."
+                )
+                fix_ok, _, fix_err, _ = _call_gemini(
+                    fix_prompt, worktree_path, console,
+                    system_md_path=system_md_path,
+                )
+                if fix_ok:
+                    result = validate_changes(worktree_path, task)
+                    task["validation_warnings"] = result.warnings
+                    task["changed_files"] = result.changed_files
+                    if result.warnings:
+                        for w in result.warnings:
+                            console.print(f"    [yellow][!][/yellow] {w}")
+                    if result.success:
+                        console.print("    [green]Syntax fix verified — continuing.[/green]")
+                    else:
+                        console.print(f"    [red]!! Still failing after syntax fix:[/red] {result.error}")
+                        task["status"] = "failed"
+                        task["error"] = result.error
+                        return task
+                else:
+                    console.print(f"    [red]!! Syntax fix call failed:[/red] {fix_err}")
+                    task["status"] = "failed"
+                    task["error"] = f"Syntax fix failed: {fix_err}"
+                    return task
+            else:
+                console.print(f"    [red]!! Validation failed:[/red] {result.error}")
+                task["status"] = "failed"
+                task["error"] = result.error
+                return task
 
         # ---- e2. Review diff (Claude sanity-checks before commit) ------
         _diff_proc = subprocess.run(
             ["git", "diff"], cwd=worktree_path,
             capture_output=True, text=True,
+            encoding="utf-8",
         )
         _approved, _review_reason = brain.review_diff(task, _diff_proc.stdout or "")
         if not _approved:
@@ -1111,19 +1158,12 @@ def execute_task(
             default_branch = wt.get_default_branch(repo_root)
             try:
                 subprocess.run(
-                    ["git", "fetch", "origin"],
+                    ["git", "pull", "--rebase", "--autostash", "origin", default_branch],
                     cwd=str(repo_root),
                     check=True,
                     capture_output=True,
                     text=True,
-                )
-                subprocess.run(
-                    ["git", "reset", "--hard",
-                     f'origin/{default_branch}'],
-                    cwd=str(repo_root),
-                    check=True,
-                    capture_output=True,
-                    text=True,
+                    encoding="utf-8",
                 )
                 console.print(
                     f"    [green]Pulled latest {default_branch} after merge.[/green]"
@@ -1198,6 +1238,7 @@ def run_grind(
     workers: int = 1,
     use_sandbox: bool = False,
     session_id: Optional[str] = None,
+    auto_sync: bool = True,
 ) -> tuple[list[dict], float, str]:
     """Load pending tasks and execute each one sequentially.
 
@@ -1212,6 +1253,7 @@ def run_grind(
         workers: Number of parallel workers (reserved for future use).
         use_sandbox: If True, run tasks in E2B cloud VMs.
         session_id: Optional memory session identifier.
+        auto_sync: If True, fetch + rebase from origin before loading tasks.
 
     Returns:
         Tuple of (all_tasks, grind_credits, session_id).
@@ -1221,6 +1263,15 @@ def run_grind(
 
     project_root = grindbot_dir.parent
     sid = session_id or ""
+
+    # --- Pre-grind sync -----------------------------------------------------
+    if auto_sync:
+        repo_root = find_repo_root(grindbot_dir) or project_root
+        sync_ok, pulled, sync_err = wt.sync_from_remote(repo_root)
+        if not sync_ok:
+            console.print(f"[yellow][!] Remote sync failed (continuing anyway): {sync_err}[/yellow]")
+        elif pulled:
+            console.print(f"[dim]Pulled {pulled} commit(s) from remote.[/dim]")
 
     # --- Load tasks ---------------------------------------------------------
     all_tasks = load_tasks(grindbot_dir.parent)

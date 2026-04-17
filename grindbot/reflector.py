@@ -43,7 +43,7 @@ def _collect_session_data(tasks: list[dict]) -> dict[str, Any]:
             "prompt_type": t.get("prompt_type"),
             "error": t.get("error"),
             "merge_reason": t.get("merge_reason"),
-            "validation_warnings": t.get("validation_warnings") or [],
+            "had_warnings": bool(t.get("validation_warnings")),
         })
 
     total = len(executed)
