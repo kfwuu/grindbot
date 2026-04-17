@@ -1,0 +1,23 @@
+{
+  "session_id": "grind-2026-04-12-6feb",
+  "started_at": "2026-04-12T06:27:50.386514+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {
+    "001": {
+      "title": "daemon command uses project_path for save_tasks but scan used brain.plan_tasks",
+      "status": "failed",
+      "failure_reason": "git apply failed: error: patch failed: grindbot/cli.py:430\nerror: grindbot/cli.py: patch does not apply\n"
+    }
+  },
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": []
+}

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Users/d/Desktop/grindbot\" && pip install -e . 2>&1)",
+      "Bash(grindbot:*)",
+      "Bash(cd:*)",
+      "Bash(tail:*)",
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(gemini:*)",
+      "Bash(pip uninstall grindbot -y && pip install -e \"C:/Users/d/Desktop/grindbot\" 2>&1)",
+      "Bash(where gemini:*)",
+      "Bash(echo EXIT: $?:*)",
+      "Bash(cd \"C:/Users/d/Desktop/agent minig\" && pip install -e . -q && python -c \"\nfrom click.testing import CliRunner\nfrom grindbot.cli import main\nrunner = CliRunner\\(\\)\nr = runner.invoke\\(main, ['--help']\\)\nprint\\(r.output\\)\nr2 = runner.invoke\\(main, ['grind', '--help']\\)\nprint\\(r2.output\\)\n\" 2>&1)",
+      "mcp__claude_ai_firecrawl__firecrawl_search"
+    ]
+  }
+}

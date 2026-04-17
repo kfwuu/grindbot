@@ -1,0 +1,93 @@
+- belief: When the orchestrator instructs a refactoring change, it frequently fails
+    to enumerate existing behaviors that must be preserved (like .strip() calls, quote
+    removal, guard clause ordering), leading to regressions that the reviewer catches
+    but cannot prevent.
+  confidence: 0.85
+  history: []
+  key: refactoring_drops_edge_case_behavior
+  primary_agent: orchestrator
+  relevant_to:
+  - executor
+  sessions_seen:
+  - grind-2026-04-12-3599
+  sessions_since_reinforced: 5
+- belief: Scheduling two tasks that edit the same file (e.g., executor.py) in one
+    session causes the second merge to fail with conflicts. The planner must enforce
+    one-task-per-file.
+  confidence: 0.95
+  history: []
+  key: same_file_collision_causes_merge_failures
+  primary_agent: orchestrator
+  relevant_to:
+  - scanner
+  sessions_seen:
+  - grind-2026-04-12-3599
+  sessions_since_reinforced: 5
+- belief: Tasks that require restructuring try/finally blocks, moving cleanup code
+    to different exit paths, or ensuring resource cleanup on early returns consistently
+    fail. The executor cannot reliably reason about all branches and exception paths
+    simultaneously. These should be excluded at the planning stage.
+  confidence: 0.8
+  history: []
+  key: try-finally-restructuring-fails
+  primary_agent: orchestrator
+  relevant_to:
+  - orchestrator
+  - scanner
+  sessions_seen:
+  - grind-2026-04-17-c996
+  sessions_since_reinforced: 4
+- belief: Tasks about worktree cleanup, worktree deletion on early returns, or ensuring
+    cleanup runs on all exit paths always fail. The Gemini agent cannot reason about
+    complex control flow with try/finally and multiple return paths. These tasks cause
+    Gemini CLI exit code 1 errors. They must be filtered at the planning stage.
+  confidence: 0.9
+  history: []
+  key: worktree-cleanup-tasks-always-fail
+  primary_agent: orchestrator
+  relevant_to:
+  - orchestrator
+  - scanner
+  sessions_seen:
+  - grind-2026-04-17-cec3
+  sessions_since_reinforced: 2
+- belief: When banning certain task categories in prompts, the ban must appear at
+    the very top of the prompt before any task generation guidance. Bans buried after
+    generation instructions are sometimes ignored by the model.
+  confidence: 0.8
+  history: []
+  key: ban-rules-must-be-prominent
+  primary_agent: orchestrator
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-17-bdfd
+  sessions_since_reinforced: 2
+- belief: Race condition and concurrency tasks always produce syntax errors or broken
+    code. The executor cannot reason about concurrent code paths in executor.py. These
+    must be banned at the planning stage.
+  confidence: 0.9
+  history: []
+  key: race-condition-tasks-always-fail
+  primary_agent: orchestrator
+  relevant_to:
+  - orchestrator
+  - scanner
+  sessions_seen:
+  - grind-2026-04-17-12bf
+  sessions_since_reinforced: 1
+- belief: The Gemini executor sometimes finds an easy fix in the codebase and applies
+    it regardless of which task it was assigned. This is especially common when the
+    actual task is hard (like fixing a schema bug) but an unrelated simple fix (like
+    replacing git pull) is nearby. Orchestrator prompts should anchor the executor
+    to the specific function and code pattern described in the task.
+  confidence: 0.8
+  history: []
+  key: executor-applies-easiest-fix-ignoring-task
+  primary_agent: orchestrator
+  relevant_to:
+  - orchestrator
+  - executor
+  sessions_seen:
+  - grind-2026-04-17-b1e2
+  sessions_since_reinforced: 0

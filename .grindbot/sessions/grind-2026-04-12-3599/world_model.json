@@ -1,0 +1,51 @@
+{
+  "session_id": "grind-2026-04-12-3599",
+  "started_at": "2026-04-12T07:21:02.435093+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {
+    "001": {
+      "title": "daemon command uses project_path for save_tasks but scan used brain.plan_tasks",
+      "status": "failed",
+      "failure_reason": "git apply failed: error: patch failed: grindbot/cli.py:430\nerror: grindbot/cli.py: patch does not apply\n"
+    }
+  },
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": [
+    {
+      "claim": "executor.py is a high-contention file that frequently appears in multiple tasks per session, making it the most common source of merge conflicts",
+      "confidence": "high",
+      "evidence": [
+        "task-003 modified executor.py",
+        "task-005 modified executor.py",
+        "task-003 failed with merge conflict after task-005 merged first"
+      ],
+      "suggested_action": "The planner should treat executor.py edits as mutually exclusive and never schedule more than one task touching it per session"
+    },
+    {
+      "claim": "Behavioral regressions in refactoring tasks originate from the orchestrator, not the executor - the executor faithfully implements incomplete instructions",
+      "confidence": "high",
+      "evidence": [
+        "task-004 was rejected because quote stripping was dropped and env var scope broadened, but the orchestrator instructions likely did not mention preserving those behaviors",
+        "task-001 placed a line before a None guard, suggesting the orchestrator's REPLACE block had the wrong ordering"
+      ],
+      "suggested_action": "Add a PRESERVE checklist to orchestrator prompts requiring explicit enumeration of behaviors that must survive the refactoring"
+    },
+    {
+      "claim": "cli.py is likely being modified between when the orchestrator reads it and when the executor applies the patch, causing patch application failures",
+      "confidence": "medium",
+      "evidence": [
+        "task-001 failed with 'patch does not apply' on cli.py:430"
+      ],
+      "suggested_action": "Investigate whether concurrent worktree operations or prior session merges are changing cli.py between plan time and execution time"
+    }
+  ]
+}

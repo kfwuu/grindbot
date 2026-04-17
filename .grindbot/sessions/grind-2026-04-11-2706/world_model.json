@@ -1,0 +1,51 @@
+{
+  "session_id": "grind-2026-04-11-2706",
+  "started_at": "2026-04-11T03:52:27.694169+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {
+    "011": {
+      "title": "Gemini runs with --yolo flag bypassing all confirmation prompts",
+      "status": "failed",
+      "failure_reason": "Claude rejected: Removing --yolo from automated subprocess calls to Gemini CLI will cause the process to hang waiting for interactive confirmation prompts that can never be answered, breaking core GrindBot automation. The commit message itself suggests alternatives (sandboxing, documentation) but the actual change just removes the flag without implementing any alternative, causing a functional regression."
+    }
+  },
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": [
+    {
+      "claim": "Tasks with prompt_type 'static' (using executor_task_tool fallback) are more likely to fail than orchestrated tasks because they lack task-specific context from Claude's orchestrator.",
+      "confidence": "medium",
+      "evidence": [
+        "task-011 was the only 'static' prompt_type task and it was the only failure in this session",
+        "all 10 orchestrated tasks succeeded"
+      ],
+      "suggested_action": "Track prompt_type vs success rate across sessions. If static tasks consistently underperform, consider making orchestration mandatory or enriching the static prompt with more domain rules."
+    },
+    {
+      "claim": "The --yolo flag on Gemini CLI subprocess calls is intentionally required for non-interactive automated operation and should not be removed without implementing sandboxing or an allowlist alternative.",
+      "confidence": "high",
+      "evidence": [
+        "task-011 correctly rejected by reviewer because removing --yolo would cause process to hang on interactive prompts",
+        "GrindBot is designed for unattended overnight operation"
+      ],
+      "suggested_action": "Add --yolo to a documented list of intentional automation flags that should not be flagged as security issues by the scanner/planner."
+    },
+    {
+      "claim": "Pyrefly type errors for rich.console and rich.panel imports are persistent false positives caused by the type checker not finding the virtual environment's site-packages, not actual code issues.",
+      "confidence": "high",
+      "evidence": [
+        "Every task that touched executor.py reported identical pyrefly import errors for rich.console and rich.panel",
+        "All such tasks were successfully merged despite these warnings"
+      ],
+      "suggested_action": "Configure pyrefly to find the project's virtualenv site-packages, or add rich imports to a pyrefly ignore list to reduce noise in validation output."
+    }
+  ]
+}

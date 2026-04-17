@@ -1,0 +1,28 @@
+{
+  "session_id": "grind-2026-04-12-45ed",
+  "started_at": "2026-04-12T07:59:25.651901+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {
+    "003": {
+      "title": "Worktree not cleaned up when merge/PR flow fails mid-way",
+      "status": "failed",
+      "failure_reason": "PR merge failed: X Pull request kfwuu/grindbot#20 is not mergeable: the merge commit cannot be cleanly created.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nRun the following to resolve the merge conflicts locally:\n  gh pr checkout 20 && git fetch origin master && git merge origin/master"
+    },
+    "004": {
+      "title": "API key loaded from ~/.env with no file permission check",
+      "status": "failed",
+      "failure_reason": "PR merge failed: X Pull request kfwuu/grindbot#21 is not mergeable: the merge commit cannot be cleanly created.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nRun the following to resolve the merge conflicts locally:\n  gh pr checkout 21 && git fetch origin master && git merge origin/master"
+    }
+  },
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": []
+}

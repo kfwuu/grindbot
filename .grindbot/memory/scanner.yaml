@@ -1,0 +1,78 @@
+- belief: The scanner sometimes identifies valid security concerns but frames them
+    as tasks whose obvious fix would break core functionality. Security tasks should
+    include a viable remediation path, not just flag the concern.
+  confidence: 0.65
+  history: []
+  key: scanner_security_tasks_need_viable_fixes
+  primary_agent: scanner
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-2706
+  sessions_since_reinforced: 6
+- belief: Do not report issues about worktree cleanup, resource cleanup on early returns,
+    or try/finally restructuring. These tasks consistently fail because the executor
+    cannot reason about all code paths in complex functions.
+  confidence: 0.8
+  history: []
+  key: skip-cleanup-path-tasks
+  primary_agent: scanner
+  relevant_to:
+  - scanner
+  sessions_seen:
+  - grind-2026-04-17-c996
+  sessions_since_reinforced: 4
+- belief: 'Do not report issues that require restructuring try/finally blocks, moving
+    cleanup code between exit paths, or ensuring resource cleanup on early returns.
+    These tasks consistently fail when the executor agent attempts them. Examples:
+    worktree cleanup skipped on merge failure, resource not released on early return.'
+  confidence: 0.9
+  history: []
+  key: skip-control-flow-restructuring
+  primary_agent: scanner
+  relevant_to:
+  - orchestrator
+  - scanner
+  sessions_seen:
+  - grind-2026-04-17-cec3
+  sessions_since_reinforced: 3
+- belief: Tasks involving worktree cleanup, worktree lifecycle, or resource cleanup
+    on early returns always fail. The Gemini agent cannot reason about complex control
+    flow with try/finally blocks and multiple exit paths. These tasks must never be
+    generated.
+  confidence: 0.9
+  history: []
+  key: worktree-cleanup-tasks-always-fail
+  primary_agent: scanner
+  relevant_to:
+  - orchestrator
+  - scanner
+  sessions_seen:
+  - grind-2026-04-17-bdfd
+  sessions_since_reinforced: 2
+- belief: The brain_plan KEYWORD BAN validation list must include all terms from the
+    prose ban sections. If a category is banned in prose but its keywords are missing
+    from the final validation scan, tasks slip through. Always verify keyword parity.
+  confidence: 0.9
+  history: []
+  key: keyword-ban-must-match-prose-bans
+  primary_agent: scanner
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-17-12bf
+  sessions_since_reinforced: 1
+- belief: The scanner generates race-condition and parallel-worker tasks that contain
+    banned keywords (race condition, parallel workers, concurrent writes). Even though
+    brain_plan has keyword bans, these tasks still get through. The scanner itself
+    should avoid generating concurrency tasks.
+  confidence: 0.8
+  history: []
+  key: concurrency-tasks-bypass-planner-bans
+  primary_agent: scanner
+  relevant_to:
+  - scanner
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-17-b1e2
+  sessions_since_reinforced: 0

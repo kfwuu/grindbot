@@ -1,0 +1,172 @@
+- archived_at: '2026-04-17T04:57:07.063006+00:00'
+  archived_from: executor
+  belief: Gemini CLI exits with code 1 when prompts are too long or contain complex
+    code blocks with special characters. Tasks involving control-flow restructuring
+    around locks and context managers are particularly prone to this.
+  confidence: 0.09999999999999992
+  history: []
+  key: gemini_cli_exit_code_1_on_complex_prompts
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-10-693b
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T05:02:22.568058+00:00'
+  archived_from: executor
+  belief: The execute_task method in executor.py is one of the longest and most complex
+    functions in the codebase, involving locks, worktrees, git operations, and nested
+    try/finally blocks. Edits to this function require carefully scoped Find/Replace
+    blocks.
+  confidence: 0.0
+  history: []
+  key: executor_execute_task_is_complex
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-10-693b
+  sessions_since_reinforced: 9
+- archived_at: '2026-04-17T05:02:22.568077+00:00'
+  archived_from: executor
+  belief: Gemini CLI can exit with code 1 on complex control-flow refactoring tasks,
+    possibly due to prompt size, complexity, or CMD character issues. These tasks
+    need especially concise prompts.
+  confidence: 0.0
+  history: []
+  key: gemini_cli_exit1_on_complex_prompts
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-10-679c
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T05:02:22.588876+00:00'
+  archived_from: reviewer
+  belief: Pyrefly consistently reports missing-import errors for rich.console and
+    rich.panel because the type checker cannot find the rich package in the configured
+    Python environment. These are false positives and should not block merges.
+  confidence: 0.0
+  history: []
+  key: pyrefly_rich_false_positives
+  primary_agent: reviewer
+  relevant_to:
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-10-693b
+  sessions_since_reinforced: 9
+- archived_at: '2026-04-17T05:24:48.916901+00:00'
+  archived_from: executor
+  belief: 'When restructuring code to move a return outside a lock or context manager,
+    the safest pattern is: store in a result variable inside the block, return after
+    the block exits. This minimizes diff size and reduces prompt complexity.'
+  confidence: 0.0
+  history: []
+  key: result_variable_pattern_for_locks
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - executor
+  sessions_seen:
+  - grind-2026-04-10-679c
+  sessions_since_reinforced: 9
+- archived_at: '2026-04-17T05:24:48.916919+00:00'
+  archived_from: executor
+  belief: Gemini CLI is prone to exit-code-1 failures when orchestrated prompts for
+    lock/context-manager refactoring contain deeply indented Find/Replace blocks.
+    Descriptive plain-English prompts are more reliable for these tasks.
+  confidence: 0.04999999999999999
+  history: []
+  key: gemini_cli_lock_refactor_fragile
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-10-ceff
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T05:24:48.916924+00:00'
+  archived_from: executor
+  belief: When Gemini CLI exits with code 1, the retry with the same prompt also fails.
+    The root cause is usually the prompt content, not a transient API issue.
+  confidence: 0.0
+  history: []
+  key: gemini_retry_same_failure
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - executor
+  sessions_seen:
+  - grind-2026-04-10-ceff
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T05:24:48.936086+00:00'
+  archived_from: reviewer
+  belief: Pyrefly type checker consistently reports false positives for rich.console
+    and rich.panel imports because the validation environment lacks the rich package.
+    These warnings are safe to ignore.
+  confidence: 0.0
+  history: []
+  key: pyrefly_false_positives_on_rich
+  primary_agent: reviewer
+  relevant_to:
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-10-679c
+  sessions_since_reinforced: 9
+- archived_at: '2026-04-17T05:39:07.022035+00:00'
+  archived_from: executor
+  belief: Lock and context manager restructuring tasks have a higher failure rate
+    with Gemini CLI. When the orchestrated prompt quotes Python code with deep indentation
+    or special characters for these tasks, Gemini CLI may crash with exit code 1.
+  confidence: 0.09999999999999992
+  history: []
+  key: lock_refactoring_crash_risk
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-10-2c87
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T05:39:07.022047+00:00'
+  archived_from: executor
+  belief: Gemini CLI exit code 1 indicates a process-level failure, not a bad diff.
+    This can be caused by overly long prompts, special characters breaking Windows
+    CMD, or Gemini API errors. It is not recoverable by prompt content alone if the
+    issue is transient.
+  confidence: 0.04999999999999999
+  history: []
+  key: gemini_cli_exit_code_1
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - executor
+  sessions_seen:
+  - grind-2026-04-10-2c87
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T05:39:07.040054+00:00'
+  archived_from: reviewer
+  belief: The brain_review_merge prompt is producing high-quality reviews with clear,
+    specific merge reasons. All 6 merged tasks had appropriate justifications.
+  confidence: 0.0
+  history: []
+  key: merge_review_quality_high
+  primary_agent: reviewer
+  relevant_to:
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-10-ceff
+  sessions_since_reinforced: 9
+- archived_at: '2026-04-17T05:39:07.040064+00:00'
+  archived_from: reviewer
+  belief: Task 005 was approved with a noted concern that stderr_thread is never joined
+    after proc.wait(), meaning stderr_lines could be incomplete in a race. This is
+    a known minor gap that may need a follow-up task.
+  confidence: 0.19999999999999996
+  history: []
+  key: merge_review_stderr_thread_join
+  primary_agent: reviewer
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-10-2c87
+  sessions_since_reinforced: 8

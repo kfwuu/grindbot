@@ -1,0 +1,102 @@
+- belief: Tasks involving lock/context-manager refactoring combined with try/finally
+    restructuring are high-risk and prone to executor crashes, especially when the
+    Gemini agent misunderstands the scope of the transformation.
+  confidence: 0.45
+  history: []
+  key: lock_refactor_failure_pattern
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 7
+- belief: Worktree paths can resolve to different base directories (.worktrees vs
+    .grindbot/.worktrees) depending on timing relative to path-fixing commits, which
+    can cause NoneType errors when file reads return None due to missing paths.
+  confidence: 0.35000000000000003
+  history: []
+  key: worktree_path_inconsistency
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 7
+- belief: The executor crashes with NoneType is not subscriptable when a Gemini tool
+    call returns an unexpected None response, likely from a file read on a path that
+    does not exist in the worktree. The executor does not guard against None returns
+    from tool calls.
+  confidence: 0.39999999999999997
+  history: []
+  key: nonetype_subscript_crash
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 7
+- belief: Removing non-interactive flags (--yolo, --yes, etc.) from subprocess calls
+    in GrindBot causes the spawned process to hang waiting for interactive confirmation
+    that can never be provided, since GrindBot runs unattended.
+  confidence: 0.85
+  history: []
+  key: automation_flag_removal_breaks_subprocess
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-11-2706
+  sessions_since_reinforced: 6
+- belief: The static executor_task_tool prompt is used as a fallback when Claude orchestration
+    is unavailable. It lacks domain-specific awareness of GrindBot's automation requirements,
+    making it prone to producing functionally regressive changes for tasks involving
+    subprocess flags or automation configuration.
+  confidence: 0.7000000000000001
+  history: []
+  key: static_prompt_lacks_domain_context
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-2706
+  sessions_since_reinforced: 6
+- belief: Despite extensive string safety rules in the prompt, Gemini still produces
+    unterminated string literals. The issue appears in roughly 20-25% of tasks that
+    involve editing string-heavy code.
+  confidence: 0.8
+  history: []
+  key: string_literal_failures_persistent
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-12-3599
+  sessions_since_reinforced: 5
+- belief: When multiple tasks edit the same file in parallel worktrees, the second
+    task to merge will likely fail with git apply or merge conflict errors. This is
+    a structural issue, not an executor quality issue.
+  confidence: 0.9
+  history: []
+  key: patch_apply_failures_from_concurrent_edits
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - scanner
+  sessions_seen:
+  - grind-2026-04-12-3599
+  sessions_since_reinforced: 5
+- belief: Gemini CLI exit code 1 can indicate either a transient API failure or that
+    the prompt was too complex or malformed for the agent to process. Control flow
+    restructuring tasks are especially prone to this failure mode.
+  confidence: 0.6
+  history: []
+  key: gemini-cli-exit-code-1
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - executor
+  sessions_seen:
+  - grind-2026-04-17-c996
+  sessions_since_reinforced: 4

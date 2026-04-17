@@ -1,0 +1,45 @@
+{
+  "session_id": "grind-2026-04-11-ff62",
+  "started_at": "2026-04-11T00:48:19.524747+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {},
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": [
+    {
+      "claim": "Lock/context-manager refactoring tasks that also involve try/finally blocks have a significantly higher failure rate than other task types because the orchestrator prompt's instruction to 'tell the planner to split' is a dead end, leading to confused or over-scoped prompts.",
+      "confidence": "high",
+      "evidence": [
+        "task-007 failed with NoneType crash on a lock+return refactoring task",
+        "task-007 title explicitly mentions lock scope issue which likely also involves try/finally"
+      ],
+      "suggested_action": "The orchestrator prompt has been updated to handle only the lock part and explicitly instruct the agent to leave try/finally unchanged. Monitor next session for similar task types."
+    },
+    {
+      "claim": "Task-007's worktree was created at a different path (.worktrees/task-007) than all other tasks (.grindbot/.worktrees/task-XXX), suggesting a race condition or path resolution bug in worktree creation that may have contributed to the NoneType crash.",
+      "confidence": "medium",
+      "evidence": [
+        "task-007 pyrefly path shows .worktrees/task-007 without .grindbot prefix",
+        "all other tasks (001-006) show .grindbot/.worktrees/task-XXX",
+        "task-006 fixed a path inconsistency bug between project_path and grindbot_dir.parent"
+      ],
+      "suggested_action": "Add a scanner hint to check whether worktree creation consistently uses grindbot_dir-relative paths. The path fix in task-006 may need to be extended to worktree creation code."
+    },
+    {
+      "claim": "The executor does not gracefully handle None returns from Gemini tool calls (file reads or edits), causing unhandled NoneType is not subscriptable exceptions instead of retries or meaningful error messages.",
+      "confidence": "medium",
+      "evidence": [
+        "task-007 crashed with 'NoneType object is not subscriptable' which is a Python runtime error, not a code review rejection"
+      ],
+      "suggested_action": "Add a scanning task in the next session to find places in executor.py where tool call results are subscripted without None checks."
+    }
+  ]
+}

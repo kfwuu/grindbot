@@ -1,0 +1,13 @@
+- belief: When multiple tasks in the same session produce identical or near-identical
+    diffs, later ones are likely the executor applying the same fix regardless of
+    the task. Flag and revert duplicates.
+  confidence: 0.85
+  history: []
+  key: detect-duplicate-fixes-across-tasks
+  primary_agent: merge
+  relevant_to:
+  - merge
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-17-b1e2
+  sessions_since_reinforced: 0

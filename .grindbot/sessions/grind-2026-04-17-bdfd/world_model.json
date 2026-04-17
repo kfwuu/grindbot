@@ -1,0 +1,23 @@
+{
+  "session_id": "grind-2026-04-17-bdfd",
+  "started_at": "2026-04-17T05:00:18.732231+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {
+    "001": {
+      "status": "failed",
+      "title": "Worktree cleanup skipped when execute_task returns early after merge failure",
+      "failure_reason": "Gemini CLI exited with code 1"
+    }
+  },
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": []
+}

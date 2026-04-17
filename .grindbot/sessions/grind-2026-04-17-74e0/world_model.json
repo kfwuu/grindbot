@@ -1,0 +1,23 @@
+{
+  "session_id": "grind-2026-04-17-74e0",
+  "started_at": "2026-04-17T07:36:18.266544+00:00",
+  "project_observations": {
+    "patterns": [],
+    "file_notes": {},
+    "gotchas": []
+  },
+  "task_outcomes": {
+    "008": {
+      "status": "failed",
+      "title": "merge_branch returns (True, stash-pop-error) on merge success but stash pop failure",
+      "failure_reason": "Unhandled exception: 'NoneType' object is not subscriptable"
+    }
+  },
+  "agent_observations": {
+    "orchestrator": [],
+    "executor": [],
+    "reviewer": [],
+    "scanner": []
+  },
+  "hypotheses": []
+}
