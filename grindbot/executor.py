@@ -526,6 +526,7 @@ def _run_tool_mode(
 
         proc.wait(timeout=timeout)
         t.join(timeout=5)
+        stderr_thread.join(timeout=5)
         return proc.returncode, "".join(stdout_lines)
 
     except subprocess.TimeoutExpired:
@@ -533,6 +534,7 @@ def _run_tool_mode(
             proc.kill()
         except Exception:
             pass
+        stderr_thread.join(timeout=5)
         return -1, ""
     except Exception as exc:
         console.print(f"[red]Gemini process error: {exc}[/red]")
@@ -540,6 +542,7 @@ def _run_tool_mode(
             proc.kill()
         except Exception:
             pass
+        stderr_thread.join(timeout=5)
         return -2, ""
 
 
