@@ -2,7 +2,7 @@
     to enumerate existing behaviors that must be preserved (like .strip() calls, quote
     removal, guard clause ordering), leading to regressions that the reviewer catches
     but cannot prevent.
-  confidence: 0.85
+  confidence: 0.75
   history: []
   key: refactoring_drops_edge_case_behavior
   primary_agent: orchestrator
@@ -10,11 +10,11 @@
   - executor
   sessions_seen:
   - grind-2026-04-12-3599
-  sessions_since_reinforced: 5
+  sessions_since_reinforced: 6
 - belief: Scheduling two tasks that edit the same file (e.g., executor.py) in one
     session causes the second merge to fail with conflicts. The planner must enforce
     one-task-per-file.
-  confidence: 0.95
+  confidence: 0.85
   history: []
   key: same_file_collision_causes_merge_failures
   primary_agent: orchestrator
@@ -22,7 +22,7 @@
   - scanner
   sessions_seen:
   - grind-2026-04-12-3599
-  sessions_since_reinforced: 5
+  sessions_since_reinforced: 6
 - belief: Tasks that require restructuring try/finally blocks, moving cleanup code
     to different exit paths, or ensuring resource cleanup on early returns consistently
     fail. The executor cannot reliably reason about all branches and exception paths
@@ -36,7 +36,7 @@
   - scanner
   sessions_seen:
   - grind-2026-04-17-c996
-  sessions_since_reinforced: 4
+  sessions_since_reinforced: 5
 - belief: Tasks about worktree cleanup, worktree deletion on early returns, or ensuring
     cleanup runs on all exit paths always fail. The Gemini agent cannot reason about
     complex control flow with try/finally and multiple return paths. These tasks cause
@@ -50,7 +50,7 @@
   - scanner
   sessions_seen:
   - grind-2026-04-17-cec3
-  sessions_since_reinforced: 2
+  sessions_since_reinforced: 3
 - belief: When banning certain task categories in prompts, the ban must appear at
     the very top of the prompt before any task generation guidance. Bans buried after
     generation instructions are sometimes ignored by the model.
@@ -62,7 +62,7 @@
   - orchestrator
   sessions_seen:
   - grind-2026-04-17-bdfd
-  sessions_since_reinforced: 2
+  sessions_since_reinforced: 3
 - belief: Race condition and concurrency tasks always produce syntax errors or broken
     code. The executor cannot reason about concurrent code paths in executor.py. These
     must be banned at the planning stage.
@@ -75,7 +75,7 @@
   - scanner
   sessions_seen:
   - grind-2026-04-17-12bf
-  sessions_since_reinforced: 1
+  sessions_since_reinforced: 2
 - belief: The Gemini executor sometimes finds an easy fix in the codebase and applies
     it regardless of which task it was assigned. This is especially common when the
     actual task is hard (like fixing a schema bug) but an unrelated simple fix (like
@@ -90,4 +90,4 @@
   - executor
   sessions_seen:
   - grind-2026-04-17-b1e2
-  sessions_since_reinforced: 0
+  sessions_since_reinforced: 1

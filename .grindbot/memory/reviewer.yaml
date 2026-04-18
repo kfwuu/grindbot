@@ -1,31 +1,19 @@
-- belief: Path fixes like task-006 (grindbot_dir.parent vs project_path) can affect
-    concurrent tasks that were already spun up with stale path resolution, causing
-    downstream failures.
-  confidence: 0.3
-  history: []
-  key: path_consistency_matters
-  primary_agent: reviewer
-  relevant_to:
-  - orchestrator
-  sessions_seen:
-  - grind-2026-04-11-ff62
-  sessions_since_reinforced: 7
 - belief: The brain_review_merge reviewer correctly identifies changes that would
     cause functional regressions even when they address a legitimate concern, such
     as removing automation flags without implementing alternatives.
-  confidence: 0.8
+  confidence: 0.6000000000000001
   history: []
   key: reviewer_catches_functional_regressions
   primary_agent: reviewer
   relevant_to: []
   sessions_seen:
   - grind-2026-04-11-2706
-  sessions_since_reinforced: 6
+  sessions_since_reinforced: 7
 - belief: The brain_review_merge reviewer successfully identified the behavioral regression
     in task 004 (dropped quote stripping, broadened env var scope) and the ordering
     bug in task 001 (dereference before None guard). The reviewer is effective but
     the damage is already done by that point.
-  confidence: 0.85
+  confidence: 0.75
   history: []
   key: reviewer_catches_regressions_well
   primary_agent: reviewer
@@ -33,7 +21,7 @@
   - orchestrator
   sessions_seen:
   - grind-2026-04-12-3599
-  sessions_since_reinforced: 5
+  sessions_since_reinforced: 6
 - belief: Always verify the diff is logically connected to the task description. A
     clean, well-formed diff that fixes the wrong problem must be rejected. In one
     session, 3 different tasks all got the same git-pull-to-fetch-reset fix approved
@@ -47,4 +35,18 @@
   - merge
   sessions_seen:
   - grind-2026-04-17-b1e2
+  sessions_since_reinforced: 1
+- belief: A clean, well-structured diff is not sufficient for approval. The diff must
+    specifically address the problem described in the task. Tasks 004 and 005 in this
+    session received clean diffs that solved a completely different problem than described,
+    and both were incorrectly approved.
+  confidence: 0.95
+  history: []
+  key: verify-diff-matches-task-not-just-clean
+  primary_agent: reviewer
+  relevant_to:
+  - reviewer
+  - merge
+  sessions_seen:
+  - grind-2026-04-17-21e1
   sessions_since_reinforced: 0

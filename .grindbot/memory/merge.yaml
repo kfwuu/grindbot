@@ -10,4 +10,19 @@
   - reviewer
   sessions_seen:
   - grind-2026-04-17-b1e2
+  sessions_since_reinforced: 1
+- belief: When multiple tasks in the same session produce identical or near-identical
+    diffs (like all replacing git pull with git fetch+reset), later ones are likely
+    wrong fixes applied by the executor ignoring the task description. The merge reviewer
+    should be extra suspicious of diffs that look like common patterns applied to
+    unrelated task descriptions.
+  confidence: 0.9
+  history: []
+  key: same-fix-multiple-tasks-is-suspicious
+  primary_agent: merge
+  relevant_to:
+  - reviewer
+  - merge
+  sessions_seen:
+  - grind-2026-04-17-21e1
   sessions_since_reinforced: 0

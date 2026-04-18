@@ -170,3 +170,61 @@
   sessions_seen:
   - grind-2026-04-10-2c87
   sessions_since_reinforced: 8
+- archived_at: '2026-04-17T08:33:51.557086+00:00'
+  archived_from: executor
+  belief: Tasks involving lock/context-manager refactoring combined with try/finally
+    restructuring are high-risk and prone to executor crashes, especially when the
+    Gemini agent misunderstands the scope of the transformation.
+  confidence: 0.14999999999999997
+  history: []
+  key: lock_refactor_failure_pattern
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  - reviewer
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T08:33:51.557099+00:00'
+  archived_from: executor
+  belief: Worktree paths can resolve to different base directories (.worktrees vs
+    .grindbot/.worktrees) depending on timing relative to path-fixing commits, which
+    can cause NoneType errors when file reads return None due to missing paths.
+  confidence: 0.04999999999999999
+  history: []
+  key: worktree_path_inconsistency
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T08:33:51.557103+00:00'
+  archived_from: executor
+  belief: The executor crashes with NoneType is not subscriptable when a Gemini tool
+    call returns an unexpected None response, likely from a file read on a path that
+    does not exist in the worktree. The executor does not guard against None returns
+    from tool calls.
+  confidence: 0.09999999999999992
+  history: []
+  key: nonetype_subscript_crash
+  primary_agent: executor
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 8
+- archived_at: '2026-04-17T08:33:51.572439+00:00'
+  archived_from: reviewer
+  belief: Path fixes like task-006 (grindbot_dir.parent vs project_path) can affect
+    concurrent tasks that were already spun up with stale path resolution, causing
+    downstream failures.
+  confidence: 0.0
+  history: []
+  key: path_consistency_matters
+  primary_agent: reviewer
+  relevant_to:
+  - orchestrator
+  sessions_seen:
+  - grind-2026-04-11-ff62
+  sessions_since_reinforced: 8
