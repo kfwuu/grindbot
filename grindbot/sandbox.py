@@ -1,12 +1,13 @@
-"""Sandbox executor — runs GrindBot tasks in E2B cloud VMs.
+"""Sandbox executor — runs GrindBot tasks in Firecracker microVMs.
 
-Drop-in alternative to local worktree execution. The repo is uploaded to a
-pre-built Linux sandbox, Gemini runs there with full tool access, and the
+Each task gets a disposable Ubuntu 22.04 VM booted from a pre-built image.
+The repo is uploaded via SCP, Gemini runs with full tool access, and the
 resulting file changes are returned as a git diff to apply locally.
 
-Template must be built once:
-    cd e2b && e2b template build
-    # copy the printed template ID into E2B_TEMPLATE_ID in ~/.env
+One-time server setup:
+    See e2b/Dockerfile for how the base image was built.
+    The server must have Firecracker installed and the base image at
+    /opt/vm/rootfs.ext4 with /opt/vm/vmlinux.bin as the kernel.
 """
 import io
 import os
@@ -16,9 +17,7 @@ from typing import Any, Optional
 
 from rich.console import Console
 
-_TEMPLATE_ID_ENV = "E2B_TEMPLATE_ID"
-_DEFAULT_TEMPLATE = "grindbot-gemini"
-_SANDBOX_TIMEOUT = 300       # 5 min total sandbox lifetime
+_SANDBOX_TIMEOUT = 300       # 5 min total VM lifetime
 _GEMINI_RUN_TIMEOUT = 210    # 3.5 min for the Gemini call itself
 
 # Directories to exclude when uploading the repo to the sandbox
@@ -27,7 +26,7 @@ _SKIP_DIRS = frozenset({
     ".worktrees", ".grindbot", "out", "dist", ".next", ".venv", "venv",
 })
 
-# File name patterns to exclude (sensitive credentials must not reach the sandbox)
+# File name patterns to exclude (sensitive credentials must not reach the VM)
 _SKIP_FILE_PATTERNS = (
     ".env", "*.env", ".env.*",
     "*.key", "*.pem",
@@ -42,16 +41,16 @@ def execute_task_in_sandbox(
     console: Console,
     timeout: int = _SANDBOX_TIMEOUT,
 ) -> dict[str, Any]:
-    """Run one task in an E2B cloud sandbox and return the file changes.
+    """Run one task in a Firecracker microVM and return the file changes.
 
     Steps:
-      1. Create sandbox from pre-built template (Gemini CLI already installed)
-      2. Upload repo as tar.gz via E2B file API (no GitHub needed)
+      1. Boot a fresh VM from the base image
+      2. Upload repo as tar.gz via SCP
       3. Extract, init a temporary git baseline commit
-      4. Write the Claude-orchestrated prompt and a Python runner script
+      4. Write the prompt and a Python runner script
       5. Run Gemini CLI inside the VM
       6. Stage all changes and capture a full git diff (including new files)
-      7. Kill sandbox (always, in finally block)
+      7. Kill VM (always, in finally block)
       8. Return diff + metadata for caller to apply locally
 
     Args:
@@ -59,83 +58,72 @@ def execute_task_in_sandbox(
         repo_root: Absolute path to the local project repo root.
         prompt: Claude-orchestrated (or static) task prompt for Gemini.
         console: Rich console for progress output.
-        timeout: Total sandbox lifetime in seconds.
+        timeout: Total VM lifetime in seconds.
 
     Returns:
         Dict with keys: success (bool), diff (str), changed_files (list[str]),
         stdout (str), stderr (str).
     """
     try:
-        from e2b import Sandbox
+        from .firecracker_vm import FirecrackerVM
     except ImportError:
-        return _fail("e2b package not installed — run: pip install e2b")
+        return _fail("firecracker_vm module not found — deploy grindbot to the Hetzner server")
 
-    env_vals = _load_env_file()
-
-    api_key = env_vals.get("E2B_API_KEY", "")
-    if not api_key:
-        return _fail("E2B_API_KEY not set — add it to ~/.env")
-
-    gemini_key = env_vals.get("GEMINI_API_KEY", "")
+    gemini_key = _load_gemini_key()
     if not gemini_key:
         return _fail("GEMINI_API_KEY not set — add it to ~/.env")
 
-    template = env_vals.get(_TEMPLATE_ID_ENV, _DEFAULT_TEMPLATE)
-
-    sandbox: Any = None
+    vm: Any = None
     try:
-        console.print(f"    [dim]☁  Creating E2B sandbox (template: {template})...[/dim]")
-        os.environ["E2B_API_KEY"] = api_key  # SDK reads from env
-        sandbox = Sandbox.create(template=template, timeout=timeout)
+        console.print("    [dim]🔥 Booting Firecracker VM...[/dim]")
+        vm = FirecrackerVM.create(timeout=timeout)
 
         # ── Upload repo ───────────────────────────────────────────────────────
-        console.print("    [dim]☁  Uploading repo...[/dim]")
+        console.print("    [dim]🔥 Uploading repo...[/dim]")
         tar_bytes = _tar_repo(repo_root)
-        sandbox.files.write("/workspace/repo.tar.gz", tar_bytes)
+        vm.run("mkdir -p /workspace", timeout=10)
+        vm.write_file("/workspace/repo.tar.gz", tar_bytes)
 
-        setup = sandbox.commands.run(
+        setup = vm.run(
             "cd /workspace && tar -xzf repo.tar.gz "
             "&& cd repo "
             "&& git init -q "
+            "&& git config user.email 'grindbot@local' "
+            "&& git config user.name 'GrindBot' "
             "&& git add . "
             "&& git commit -q -m 'base'",
             timeout=60,
         )
         if setup.exit_code != 0:
-            return _fail(f"Sandbox repo setup failed: {setup.stderr[:400]}")
+            return _fail(f"VM repo setup failed: {setup.stderr[:400]}")
 
         # ── Write prompt + runner ─────────────────────────────────────────────
-        sandbox.files.write("/workspace/prompt.txt", prompt)
+        vm.write_file("/workspace/prompt.txt", prompt)
 
         # Python runner avoids all shell-escaping issues: the prompt is read
         # from a file, never embedded in a shell string.
         runner_script = _build_runner(_GEMINI_RUN_TIMEOUT)
-        sandbox.files.write("/workspace/run_gemini.py", runner_script)
+        vm.write_file("/workspace/run_gemini.py", runner_script)
 
         # ── Run Gemini ────────────────────────────────────────────────────────
-        console.print("    [dim]☁  Gemini running in sandbox...[/dim]")
-        gem = sandbox.commands.run(
+        console.print("    [dim]🔥 Gemini running in VM...[/dim]")
+        gem = vm.run(
             "python3 /workspace/run_gemini.py",
-            envs={"GEMINI_API_KEY": gemini_key},
             timeout=_GEMINI_RUN_TIMEOUT + 10,
+            env={"GEMINI_API_KEY": gemini_key},
         )
 
         # ── Capture diff (including new/untracked files) ──────────────────────
-        # Stage everything so git diff --cached covers new files too.
-        sandbox.commands.run("cd /workspace/repo && git add .", timeout=15)
+        vm.run("cd /workspace/repo && git add .", timeout=15)
 
-        status_r = sandbox.commands.run(
-            "cd /workspace/repo && git status --porcelain", timeout=10
-        )
+        status_r = vm.run("cd /workspace/repo && git status --porcelain", timeout=10)
         changed_files = [
             line[3:].strip()
             for line in (status_r.stdout or "").splitlines()
             if line.strip()
         ]
 
-        diff_r = sandbox.commands.run(
-            "cd /workspace/repo && git diff --cached", timeout=15
-        )
+        diff_r = vm.run("cd /workspace/repo && git diff --cached", timeout=15)
         diff = diff_r.stdout or ""
 
         success = bool(diff.strip())
@@ -151,10 +139,10 @@ def execute_task_in_sandbox(
         return _fail(str(exc))
 
     finally:
-        if sandbox is not None:
+        if vm is not None:
             try:
-                sandbox.kill()
-                console.print("    [dim]☁  Sandbox killed.[/dim]")
+                vm.kill()
+                console.print("    [dim]🔥 VM killed.[/dim]")
             except Exception:
                 pass
 
@@ -163,12 +151,11 @@ def execute_task_in_sandbox(
 
 
 def _build_runner(run_timeout: int) -> str:
-    """Return a Python script that runs Gemini CLI inside the sandbox VM.
+    """Return a Python script that runs Gemini CLI inside the VM.
 
-    Reads the prompt from /workspace/prompt.txt.  GEMINI_API_KEY is injected
-    via the sandbox process ``envs=`` argument — it is intentionally NOT
-    embedded in this script so Gemini's ``--yolo`` file-read access cannot
-    expose it.
+    Reads the prompt from /workspace/prompt.txt. GEMINI_API_KEY is injected
+    via the SSH env= argument — it is intentionally NOT embedded in this
+    script so Gemini's --yolo file-read access cannot expose it.
     """
     return f"""\
 import os, subprocess, sys
@@ -193,19 +180,15 @@ sys.exit(result.returncode)
 
 
 def _tar_repo(repo_root: Path) -> bytes:
-    """Create an in-memory tar.gz of the repo, skipping noise directories and
-    sensitive credential files (.env, *.key, *.pem, *secret*, *credential*)."""
+    """Create an in-memory tar.gz of the repo, skipping noise and credentials."""
     import fnmatch
 
     def _filter(info: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
         p = Path(info.name)
-        # Skip excluded directories at any depth
         if set(p.parts) & _SKIP_DIRS:
             return None
-        # Skip sensitive files by name pattern
-        filename = p.name
         for pattern in _SKIP_FILE_PATTERNS:
-            if fnmatch.fnmatch(filename, pattern):
+            if fnmatch.fnmatch(p.name, pattern):
                 return None
         return info
 
@@ -215,41 +198,29 @@ def _tar_repo(repo_root: Path) -> bytes:
     return buf.getvalue()
 
 
-def _load_env_file() -> dict[str, str]:
-    """Read E2B_API_KEY, GEMINI_API_KEY, and E2B_TEMPLATE_ID from ~/.env.
-
-    Returns a dict of found values without touching os.environ, so keys
-    do not leak into child processes for the rest of the process lifetime.
-    Keys already set in the environment are included via os.environ as fallback.
-    """
-    _WANTED = {"E2B_API_KEY", "GEMINI_API_KEY", _TEMPLATE_ID_ENV}
-    result: dict[str, str] = {}
-
-    # Seed from environment first so shell-exported vars work without a file
-    for key in _WANTED:
-        val = os.environ.get(key, "").strip()
-        if val:
-            result[key] = val
-
+def _load_gemini_key() -> str:
+    """Read GEMINI_API_KEY from environment or ~/.env."""
+    val = os.environ.get("GEMINI_API_KEY", "").strip()
+    if val:
+        return val
     env_file = Path.home() / ".env"
     if not env_file.exists():
-        return result
+        return ""
     try:
         for line in env_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            if key in _WANTED:
-                result[key] = val.strip().strip('"').strip("'")
+            key, _, v = line.partition("=")
+            if key.strip() == "GEMINI_API_KEY":
+                return v.strip().strip('"').strip("'")
     except OSError:
         pass
-    return result
+    return ""
 
 
 def _sanitize(text: str, *secrets: str) -> str:
-    """Replace any secret values in *text* with ``[REDACTED]``."""
+    """Replace any secret values in *text* with [REDACTED]."""
     for secret in secrets:
         if secret:
             text = text.replace(secret, "[REDACTED]")
