@@ -218,11 +218,17 @@ class FirecrackerVM:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
 
-        for path in [self._rootfs_path, self._config_path, self._log_path]:
+        for path in [self._rootfs_path, self._config_path]:
             try:
                 Path(path).unlink(missing_ok=True)
             except Exception:
                 pass
+
+        # Delete serial log separately so it survives into error messages on crash
+        try:
+            Path(self._log_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
         try:
             subprocess.run(["ip", "link", "del", self._tap_name], capture_output=True)
@@ -237,6 +243,12 @@ class FirecrackerVM:
         """Block until SSH is accepting connections or timeout is reached."""
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self._proc.poll() is not None:
+                log = Path(self._log_path).read_text(errors="replace")[-1000:]
+                raise RuntimeError(
+                    f"Firecracker exited (code {self._proc.returncode}) before SSH ready.\n"
+                    f"Serial log:\n{log}"
+                )
             r = subprocess.run(
                 [
                     "ssh",
@@ -310,12 +322,14 @@ def _patch_netplan(rootfs_path: Path, vm_ip: str, host_ip: str) -> None:
             "  version: 2\n"
             "  ethernets:\n"
             "    eth0:\n"
-            f"      addresses: [{vm_ip}/24]\n"
+            "      addresses:\n"
+            f"        - {vm_ip}/24\n"
             "      routes:\n"
-            f"        - to: default\n"
+            "        - to: 0.0.0.0/0\n"
             f"          via: {host_ip}\n"
             "      nameservers:\n"
-            "        addresses: [8.8.8.8]\n"
+            "        addresses:\n"
+            "          - 8.8.8.8\n"
         )
         (netplan_dir / "01-eth0.yaml").write_text(config)
     finally:
