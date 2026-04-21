@@ -137,7 +137,7 @@ class FirecrackerVM:
         )
 
         vm = cls(vm_id, tap_name, vm_ip, subnet_idx, rootfs_path, config_path, log_path, proc)
-        vm._wait_for_ssh(timeout=30)
+        vm._wait_for_ssh(timeout=90)
         return vm
 
     def run(
