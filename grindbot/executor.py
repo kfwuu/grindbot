@@ -1268,25 +1268,6 @@ def run_grind(
     # --- Pre-grind sync -----------------------------------------------------
     if auto_sync:
         repo_root = find_repo_root(grindbot_dir) or project_root
-        # Auto-commit any local changes before syncing so pulls never conflict
-        _status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(repo_root), capture_output=True, text=True, encoding="utf-8",
-        )
-        if _status.stdout.strip():
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=str(repo_root), capture_output=True, text=True, encoding="utf-8",
-            )
-            subprocess.run(
-                ["git", "commit", "-m", "wip: auto-save before grind"],
-                cwd=str(repo_root), capture_output=True, text=True, encoding="utf-8",
-            )
-            subprocess.run(
-                ["git", "push", "origin", wt.get_default_branch(repo_root)],
-                cwd=str(repo_root), capture_output=True, text=True, encoding="utf-8",
-            )
-            console.print("[dim]Auto-saved local changes before sync.[/dim]")
         sync_ok, pulled, sync_err = wt.sync_from_remote(repo_root)
         if not sync_ok:
             console.print(f"[yellow][!] Remote sync failed (continuing anyway): {sync_err}[/yellow]")
