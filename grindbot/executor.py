@@ -862,7 +862,7 @@ def execute_task(
     # ---- a. Create worktree ------------------------------------------------
     wt_ok, wt_err = wt.create_worktree(repo_root, branch_name, worktree_path)
     if not wt_ok:
-        console.print(f"    [red]!! Worktree creation failed:[/red] {wt_err}")
+        console.print(f"  [red]!! Worktree creation failed:[/red] {wt_err}")
         task["status"] = "failed"
         task["error"] = f"Worktree creation failed: {wt_err}"
         return task
@@ -875,9 +875,8 @@ def execute_task(
         gemini_md = repo_root / "GEMINI.md"
         if gemini_md.exists():
             system_md_path = gemini_md
-            console.print(f"    [dim]GEMINI_SYSTEM_MD -> {gemini_md}[/dim]")
         else:
-            console.print("    [dim]GEMINI.md not found; running without system prompt.[/dim]")
+            console.print("  [dim]GEMINI.md not found; running without system prompt.[/dim]")
 
         # ---- c. Claude orchestrates, Gemini executes -----------------------
         # Claude writes a precise task prompt. Gemini runs it in interactive
@@ -903,50 +902,51 @@ def execute_task(
             except Exception:
                 pass
 
-        console.print("    [dim]Claude orchestrating task...[/dim]")
-        orchestrated = brain.orchestrate_task(
-            task, file_content=file_preview, memory_context=mem_ctx
-        )
+        with console.status("  [cyan]Writing task prompt...[/cyan]", spinner="dots"):
+            orchestrated = brain.orchestrate_task(
+                task, file_content=file_preview, memory_context=mem_ctx
+            )
         if orchestrated:
             prompt = _sanitize_prompt(orchestrated)
             task["prompt_type"] = "orchestrated"
-            console.print("    [dim]Using Claude-written prompt.[/dim]")
+            console.print("  [dim]✓ Prompt ready[/dim]")
         else:
             prompt = _build_task_prompt(task, single_file_mode=False)
             task["prompt_type"] = "static"
-            console.print("    [dim]Using static prompt (brain unavailable).[/dim]")
+            console.print("  [dim]✓ Prompt ready (static fallback)[/dim]")
 
         if use_sandbox:
             from . import sandbox as _sb
-            console.print("    [dim]Running Gemini in Firecracker VM...[/dim]")
-            # Upload the WORKTREE (clean git checkout), not repo_root.
-            # This guarantees the sandbox baseline matches the worktree exactly,
-            # so the returned diff applies cleanly.
-            sb_result = _sb.execute_task_in_sandbox(task, worktree_path, prompt, console)
+            with console.status("  [cyan]Running Gemini in Firecracker VM...[/cyan]", spinner="dots"):
+                # Upload the WORKTREE (clean git checkout), not repo_root.
+                # This guarantees the sandbox baseline matches the worktree exactly,
+                # so the returned diff applies cleanly.
+                sb_result = _sb.execute_task_in_sandbox(task, worktree_path, prompt, console)
             if sb_result.get("stdout"):
                 for line in (sb_result["stdout"] or "").splitlines()[:30]:
-                    console.print(f"    [dim]{line}[/dim]")
+                    console.print(f"  [dim]{line}[/dim]")
             if not sb_result["success"]:
                 task["status"] = "failed"
-                # stdout is Gemini's actual response; stderr is usually just startup banners
-                err_msg = (sb_result.get("stdout") or sb_result.get("stderr") or
+                err_msg = (sb_result.get("stderr") or sb_result.get("stdout") or
                            "Sandbox Gemini execution failed")
+                console.print(f"  [red]!! Sandbox failed:[/red] {err_msg[:300]}")
                 task["error"] = err_msg[:400]
                 return task
             apply_ok, apply_err = _apply_sandbox_diff(sb_result["diff"], worktree_path, console)
             if not apply_ok:
-                console.print(f"    [red]!! {apply_err}[/red]")
+                console.print(f"  [red]!! {apply_err}[/red]")
                 task["status"] = "failed"
                 task["error"] = apply_err
                 return task
             gem_model = "gemini-2.5-flash"
         else:
-            gem_ok, _, gem_err, gem_model = _call_gemini(
-                prompt, worktree_path, console,
-                system_md_path=system_md_path,
-            )
+            with console.status("  [cyan]Running Gemini...[/cyan]", spinner="dots"):
+                gem_ok, _, gem_err, gem_model = _call_gemini(
+                    prompt, worktree_path, console,
+                    system_md_path=system_md_path,
+                )
             if not gem_ok:
-                console.print(f"    [red]!! Gemini CLI failed:[/red] {gem_err}")
+                console.print(f"  [red]!! Gemini CLI failed:[/red] {gem_err}")
                 task["status"] = "failed"
                 task["error"] = gem_err
                 return task
@@ -954,11 +954,12 @@ def execute_task(
         # ---- d. Show which files changed -----------------------------------
         changed_preview = wt.get_changed_files(worktree_path)
         if changed_preview:
-            console.print(f"    [dim]Changed files ({len(changed_preview)}):[/dim]")
-            for f in changed_preview:
-                console.print(f"      [green]{f}[/green]")
+            console.print(
+                f"  [dim]✓ {len(changed_preview)} file(s) changed: "
+                f"{', '.join(changed_preview[:4])}[/dim]"
+            )
         else:
-            console.print("    [dim]No file changes detected.[/dim]")
+            console.print("  [dim]No changes — retrying...[/dim]")
 
             # ---- d2. Retry: Claude writes a precise find/replace prompt ----
             if file_preview is not None:
@@ -969,24 +970,24 @@ def execute_task(
                 except Exception:
                     # Keep whatever file_preview we already have if re-read fails
                     pass
-                console.print("    [dim]Generating precise retry prompt (Claude)...[/dim]")
-                retry_prompt = brain.orchestrate_retry(task, file_preview)
+                with console.status("  [cyan]Writing retry prompt...[/cyan]", spinner="dots"):
+                    retry_prompt = brain.orchestrate_retry(task, file_preview)
                 if retry_prompt:
                     retry_prompt = _sanitize_prompt(retry_prompt)
-                    console.print("    [dim]Retrying Gemini with precise prompt...[/dim]")
-                    retry_ok, _, retry_err, retry_model = _call_gemini(
-                        retry_prompt, worktree_path, console,
-                        system_md_path=system_md_path,
-                    )
+                    with console.status("  [cyan]Retrying Gemini...[/cyan]", spinner="dots"):
+                        retry_ok, _, retry_err, retry_model = _call_gemini(
+                            retry_prompt, worktree_path, console,
+                            system_md_path=system_md_path,
+                        )
                     if not retry_ok:
-                        console.print(f"    [red]!! Gemini retry failed:[/red] {retry_err}")
+                        console.print(f"  [red]!! Gemini retry failed:[/red] {retry_err}")
                         task["status"] = "failed"
                         task["error"] = f"Gemini retry failed: {retry_err}"
                         return task
                     # Check again for changes after retry
                     changed_preview = wt.get_changed_files(worktree_path)
                     if changed_preview:
-                        console.print(f"    [dim]Retry succeeded: {len(changed_preview)} file(s) changed.[/dim]")
+                        console.print(f"  [dim]✓ {len(changed_preview)} file(s) changed: {', '.join(changed_preview[:4])}[/dim]")
                     else:
                         # Still no changes after retry — fail the task
                         task["status"] = "failed"
@@ -1003,15 +1004,17 @@ def execute_task(
                 return task
 
         # ---- e. Validate ---------------------------------------------------
-        console.print("    [dim]Validating changes...[/dim]")
-        result = validate_changes(worktree_path, task)
+        with console.status("  [cyan]Validating changes...[/cyan]", spinner="dots"):
+            result = validate_changes(worktree_path, task)
+        if result.success:
+            console.print("  [dim]✓ Validation passed[/dim]")
 
         task["validation_warnings"] = result.warnings
         task["changed_files"] = result.changed_files
 
         if result.warnings:
             for w in result.warnings:
-                console.print(f"    [yellow][!][/yellow] {w}")
+                console.print(f"  [yellow][!][/yellow] {w}")
 
         if not result.success:
             # --- Syntax-error self-heal: give Gemini one chance to fix its own mistake ---
@@ -1021,7 +1024,7 @@ def execute_task(
                 and _SYNTAX_FIX_MAX_RETRIES > 0
             ):
                 console.print(
-                    f"    [yellow][!] Syntax error detected — asking Gemini to fix it (1 retry)...[/yellow]"
+                    f"  [yellow][!] Syntax error detected — asking Gemini to fix it (1 retry)...[/yellow]"
                 )
                 fix_prompt = (
                     f"SYNTAX ERROR — fix only this, do not change anything else:\n\n"
@@ -1039,38 +1042,39 @@ def execute_task(
                     task["changed_files"] = result.changed_files
                     if result.warnings:
                         for w in result.warnings:
-                            console.print(f"    [yellow][!][/yellow] {w}")
+                            console.print(f"  [yellow][!][/yellow] {w}")
                     if result.success:
-                        console.print("    [green]Syntax fix verified — continuing.[/green]")
+                        console.print("  [green]Syntax fix verified — continuing.[/green]")
                     else:
-                        console.print(f"    [red]!! Still failing after syntax fix:[/red] {result.error}")
+                        console.print(f"  [red]!! Still failing after syntax fix:[/red] {result.error}")
                         task["status"] = "failed"
                         task["error"] = result.error
                         return task
                 else:
-                    console.print(f"    [red]!! Syntax fix call failed:[/red] {fix_err}")
+                    console.print(f"  [red]!! Syntax fix call failed:[/red] {fix_err}")
                     task["status"] = "failed"
                     task["error"] = f"Syntax fix failed: {fix_err}"
                     return task
             else:
-                console.print(f"    [red]!! Validation failed:[/red] {result.error}")
+                console.print(f"  [red]!! Validation failed:[/red] {result.error}")
                 task["status"] = "failed"
                 task["error"] = result.error
                 return task
 
         # ---- e2. Review diff (Claude sanity-checks before commit) ------
-        _diff_proc = subprocess.run(
-            ["git", "diff"], cwd=worktree_path,
-            capture_output=True, text=True,
-            encoding="utf-8",
-        )
-        _approved, _review_reason = brain.review_diff(task, _diff_proc.stdout or "")
+        with console.status("  [cyan]Reviewing diff...[/cyan]", spinner="dots"):
+            _diff_proc = subprocess.run(
+                ["git", "diff"], cwd=worktree_path,
+                capture_output=True, text=True,
+                encoding="utf-8",
+            )
+            _approved, _review_reason = brain.review_diff(task, _diff_proc.stdout or "")
         if not _approved:
-            console.print(f"    [red]!! Review rejected:[/red] {_review_reason}")
+            console.print(f"  [red]!! Review rejected:[/red] {_review_reason}")
             task["status"] = "failed"
             task["error"] = f"Review rejected: {_review_reason}"
             return task
-        console.print(f"    [dim]Review: {_review_reason}[/dim]")
+        console.print(f"  [dim]✓ Approved — {_review_reason}[/dim]")
 
         # ---- f. Commit -----------------------------------------------------
         worker = gem_model if gem_model else "gemini"
@@ -1082,80 +1086,76 @@ def execute_task(
             f"Orchestrated-by: claude-opus-4-6\n\n"
             f"{task.get('description', '')[:500]}"
         )
-        commit_ok, commit_err = wt.commit_worktree(worktree_path, commit_msg)
+        with console.status("  [cyan]Committing & merging...[/cyan]", spinner="dots"):
+            commit_ok, commit_err = wt.commit_worktree(worktree_path, commit_msg)
 
-        if not commit_ok:
-            console.print(f"    [red]!! Commit failed:[/red] {commit_err}")
-            task["status"] = "failed"
-            task["error"] = f"Commit failed: {commit_err}"
-            return task
-
-        console.print(
-            f"    [green]Committed[/green] -> branch [cyan]{branch_name}[/cyan] "
-            f"({len(result.changed_files)} file(s) changed)"
-        )
-        task["branch"] = branch_name
-
-        # ---- g. Cleanup worktree (keep branch for merge) -------------------
-        branch_safe_to_delete = False
-        wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
-
-        merge_ok = False # Initialize merge_ok to False
-
-        # ---- h. Merge into main (via GitHub PR) ----------------------------
-        # Minimize critical section: only actual git merge operations inside the lock.
-        with _merge_lock:
-            # Step 1: push the task branch to remote
-            console.print(f"    [dim]Pushing {branch_name} to remote...[/dim]")
-            push_ok, push_err = wt.push_branch(repo_root, branch_name)
-            if not push_ok:
-                console.print(f"    [yellow][!] Branch push failed: {push_err}[/yellow]")
-
-            # Step 2: create GitHub PR
-            base_branch = wt.get_default_branch(repo_root)
-            pr_title = f"[GrindBot] {title}"
-            pr_body = (
-                f"Automated fix by GrindBot.\n\n"
-                f"Task: {task_id} — {title}\n"
-                f"Severity: {task.get('severity', 'medium')}\n\n"
-                f"{task.get('description', '')[:800]}"
-            )
-            pr_ok, pr_url_or_err = wt.create_github_pr(
-                repo_root, branch_name, pr_title, pr_body, base_branch
-            )
-            if pr_ok:
-                console.print(f"    [dim]PR created: {pr_url_or_err}[/dim]")
-                task["pr_url"] = pr_url_or_err
-                # Extract PR number from URL (e.g. ".../pull/25" → "25") so
-                # gh pr merge doesn't misinterpret "owner/branch" as a fork PR.
-                pr_number = pr_url_or_err.rstrip("/").split("/")[-1]
-                pr_ref = pr_number if pr_number.isdigit() else branch_name
-                # Step 3: merge via gh pr merge
-                console.print(f"    [dim]Merging PR #{pr_ref} via GitHub PR...[/dim]")
-                merged, merge_err = wt.merge_github_pr(repo_root, pr_ref)
-            else:
-                # No gh CLI or no GitHub remote — fall back to local merge
-                console.print(
-                    f"    [yellow][!] GitHub PR creation failed ({pr_url_or_err}),"
-                    " falling back to local merge.[/yellow]"
-                )
-                merged, merge_err = wt.merge_branch(repo_root, branch_name)
-
-            if not merged:
-                console.print(f"    [red]!! Merge failed:[/red] {merge_err}")
+            if not commit_ok:
+                console.print(f"  [red]!! Commit failed:[/red] {commit_err}")
                 task["status"] = "failed"
-                task["error"] = f"Merge failed: {merge_err}"
-                try:
-                    wt.close_github_pr(repo_root, branch_name)
-                except Exception:
-                    pass
-                try:
-                    wt._delete_branch(repo_root, branch_name)
-                except Exception:
-                    pass
+                task["error"] = f"Commit failed: {commit_err}"
                 return task
 
-            merge_ok = True
+            task["branch"] = branch_name
+
+            # ---- g. Cleanup worktree (keep branch for merge) -------------------
+            branch_safe_to_delete = False
+            wt.cleanup_worktree(repo_root, worktree_path, branch_name, keep_branch=True)
+
+            merge_ok = False # Initialize merge_ok to False
+
+            # ---- h. Merge into main (via GitHub PR) ----------------------------
+            # Minimize critical section: only actual git merge operations inside the lock.
+            with _merge_lock:
+                # Step 1: push the task branch to remote
+                push_ok, push_err = wt.push_branch(repo_root, branch_name)
+                if not push_ok:
+                    console.print(f"  [yellow][!] Branch push failed: {push_err}[/yellow]")
+
+                # Step 2: create GitHub PR
+                base_branch = wt.get_default_branch(repo_root)
+                pr_title = f"[GrindBot] {title}"
+                pr_body = (
+                    f"Automated fix by GrindBot.\n\n"
+                    f"Task: {task_id} — {title}\n"
+                    f"Severity: {task.get('severity', 'medium')}\n\n"
+                    f"{task.get('description', '')[:800]}"
+                )
+                pr_ok, pr_url_or_err = wt.create_github_pr(
+                    repo_root, branch_name, pr_title, pr_body, base_branch
+                )
+                if pr_ok:
+                    task["pr_url"] = pr_url_or_err
+                    # Extract PR number from URL (e.g. ".../pull/25" → "25") so
+                    # gh pr merge doesn't misinterpret "owner/branch" as a fork PR.
+                    pr_number = pr_url_or_err.rstrip("/").split("/")[-1]
+                    pr_ref = pr_number if pr_number.isdigit() else branch_name
+                    # Step 3: merge via gh pr merge
+                    merged, merge_err = wt.merge_github_pr(repo_root, pr_ref)
+                else:
+                    # No gh CLI or no GitHub remote — fall back to local merge
+                    console.print(
+                        f"  [yellow][!] GitHub PR creation failed ({pr_url_or_err}),"
+                        " falling back to local merge.[/yellow]"
+                    )
+                    merged, merge_err = wt.merge_branch(repo_root, branch_name)
+
+                if not merged:
+                    console.print(f"  [red]!! Merge failed:[/red] {merge_err}")
+                    task["status"] = "failed"
+                    task["error"] = f"Merge failed: {merge_err}"
+                    try:
+                        wt.close_github_pr(repo_root, branch_name)
+                    except Exception:
+                        pass
+                    try:
+                        wt._delete_branch(repo_root, branch_name)
+                    except Exception:
+                        pass
+                    return task
+
+                merge_ok = True
+
+        console.print(f"  [green]✓ Merged → {branch_name}[/green]")
 
         # Code after the lock (review, second push if approved, record cost)
         if merge_ok:
@@ -1169,45 +1169,42 @@ def execute_task(
                     text=True,
                     encoding="utf-8",
                 )
-                console.print(
-                    f"    [green]Pulled latest {default_branch} after merge.[/green]"
-                )
             except subprocess.CalledProcessError as exc:
                 console.print(
-                    f"    [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
+                    f"  [yellow]Warning: git pull after merge failed: {exc.stderr.strip() or exc}[/yellow]"
                 )
 
             # ---- i. Claude post-merge review (before push) ---------------------
-            console.print("    [dim]Claude reviewing merge...[/dim]")
-            head_diff = wt.get_head_diff(repo_root)
-            merge_approved, merge_reason = brain.review_merge(head_diff)
+            with console.status("  [cyan]Post-merge review...[/cyan]", spinner="dots"):
+                head_diff = wt.get_head_diff(repo_root)
+                merge_approved, merge_reason = brain.review_merge(head_diff)
 
             task["merge_reason"] = merge_reason
 
             if merge_approved:
-                console.print(f"    [green]Claude approved merge:[/green] {merge_reason}")
+                console.print(f"  [green]✓ Approved — {merge_reason}[/green]")
                 task["status"] = "completed"
                 task["error"] = None
                 # ---- j. Push only after Claude approval ------------------------
                 default_branch = wt.get_default_branch(repo_root)
                 push_ok, push_err = wt.push_branch(repo_root, default_branch)
                 if not push_ok:
-                    console.print(f"    [yellow][!] Push failed:[/yellow] {push_err}")
+                    console.print(f"  [yellow][!] Push failed:[/yellow] {push_err}")
                     task["push_error"] = push_err
                 else:
-                    console.print(f"    [dim]Pushed {default_branch} to origin.[/dim]")
+                    console.print(f"  [dim]Pushed {default_branch} to origin.[/dim]")
 
                 # Assuming _record_task_cost is called here as per prompt
                 _record_task_cost(task) # Placeholder for _record_task_cost
 
             else:
-                console.print(f"    [red]!! Claude rejected merge:[/red] {merge_reason}")
-                console.print("    [dim]Reverting...[/dim]")
+                console.print(f"  [red]!! Claude rejected merge:[/red] {merge_reason}")
+                console.print("  [dim]Reverting...[/dim]")
                 revert_ok, revert_err = wt.revert_last_commit(repo_root)
                 if revert_ok:
-                    console.print("    [yellow]Reverted. Main branch restored.[/yellow]")
+                    console.print("  [yellow]Reverted. Main branch restored.[/yellow]")
                 else:
-                    console.print(f"    [red]!! Revert failed:[/red] {revert_err}")
+                    console.print(f"  [red]!! Revert failed:[/red] {revert_err}")
                 task["status"] = "failed"
                 task["error"] = f"Claude rejected merge: {merge_reason}\\n{revert_err or ''}"
                 wt._delete_branch(repo_root, branch_name)
@@ -1433,6 +1430,13 @@ def run_grind(
 
     elapsed = time.monotonic() - start
     console.print(f"\n[dim]Finished in {elapsed:.1f}s[/dim]")
+
+    # --- Update codebase map with task outcomes ------------------------------
+    try:
+        from . import codebase_map as _cmap
+        _cmap.update_map_with_outcomes(grindbot_dir, all_tasks)
+    except Exception:
+        pass  # Non-fatal — grind results are already saved
 
     # --- Close memory session -----------------------------------------------
     if sid:

@@ -148,6 +148,28 @@ _MERGE_REVIEW_TIMEOUT = 60
 _MAX_HEAD_DIFF_BYTES = 10_000
 _REFLECT_TIMEOUT = 120
 
+_MAP_SYSTEM = """\
+You are analyzing a codebase to build a compact structural map.
+Return ONLY valid JSON — no markdown fences, no prose before or after. Start with {.
+
+Output this exact structure (all fields required, null if unknown):
+{
+  "entry_points": ["<relative path>", ...],
+  "core_dirs": {"<dir/>": "<one phrase description>", ...},
+  "patterns": ["<pattern>", ...],
+  "skip_hints": ["<hint for scanner to skip certain task types>", ...],
+  "hot_files": ["<relative path>", ...]
+}
+
+Rules:
+- entry_points: max 4, the main executable files
+- core_dirs: max 6 dirs with trailing slash, one-phrase description each
+- patterns: max 6, architectural/style patterns observed (e.g. "async throughout")
+- skip_hints: max 3, concrete reasons to skip task types (e.g. "no test runner — skip test tasks")
+- hot_files: max 5, files that appear most often in git log (likely change targets)
+- All lists max 10 items. No prose. Compact values only.\
+"""
+
 _REFLECT_SYSTEM = """\
 You are GrindBot's self-improvement engine. After each grind session you review
 all task outcomes, improve prompt templates, and extract reusable beliefs for future sessions.
@@ -351,9 +373,69 @@ def _call_claude(system: str, user_content: str, timeout: int) -> str:
     return text
 
 
+def build_codebase_map(
+    file_tree: list[str],
+    git_log: str,
+    key_files: dict[str, str],
+) -> dict[str, Any]:
+    """Ask Claude to build a compact structural map of the codebase.
+
+    One API call using a focused system prompt that returns only a JSON dict
+    with entry_points, core_dirs, patterns, skip_hints, and hot_files.
+
+    Args:
+        file_tree: List of relative file paths in the project.
+        git_log: Output of ``git log --name-only --oneline -30``.
+        key_files: Dict mapping relative paths to first 2000 chars of content.
+
+    Returns:
+        Parsed dict with map fields, or {} on any failure (graceful degradation).
+    """
+    if not _get_api_key():
+        return {}
+
+    file_tree_str = "\n".join(file_tree[:300])
+    key_files_str = ""
+    for rel, content in list(key_files.items())[:3]:
+        key_files_str += f"\n--- {rel} ---\n{content}\n"
+
+    user_msg = (
+        f"FILE TREE:\n{file_tree_str}\n\n"
+        f"GIT LOG (last 30 commits):\n{git_log}\n\n"
+        f"KEY FILE CONTENTS:{key_files_str}\n"
+        "Build the codebase map JSON now."
+    )
+
+    try:
+        raw = _call_claude(_MAP_SYSTEM, user_msg, _PLAN_TIMEOUT)
+    except RuntimeError:
+        return {}
+
+    # Strategy 1: whole response is valid JSON object
+    try:
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: find {...} block in the response
+    m = re.search(r"(\{.*\})", raw, re.DOTALL)
+    if m:
+        try:
+            result = json.loads(m.group(1))
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    return {}
+
+
 def plan_tasks(
     source_context: str,
     goal: str | None = None,
+    map_context: str = "",
 ) -> list[dict[str, Any]]:
     """Ask Claude to analyze a codebase and return a prioritised task list.
 
@@ -364,6 +446,9 @@ def plan_tasks(
         source_context: Full codebase as a concatenated labelled string
             (same format produced by scanner._collect_source_files).
         goal: Optional user-provided direction appended to the message.
+        map_context: Optional codebase map summary (≤600 chars) from
+            codebase_map.get_map_context(). Prepended to the prompt so
+            Claude uses prior structural knowledge when scanning.
 
     Returns:
         List of raw task dicts ready for planner.plan().
@@ -380,24 +465,27 @@ def plan_tasks(
             f"Prioritize tasks that directly advance this goal.\n\n"
         )
 
+    map_prefix = ""
+    if map_context:
+        map_prefix = f"{map_context}\n\n"
+
     user_msg = (
-        goal_prefix
+        map_prefix
+        + goal_prefix
         + source_context
         + "\n\n--- INSTRUCTIONS ---\n"
         "Analyze the code above. Return a JSON array of tasks. "
         "Begin your response with [ and end with ]."
     )
 
-    console.print(
-        f"\n[bold cyan]Calling Claude Opus 4.6 (planning)...[/bold cyan]"
-        f"  [dim]this may take up to {_PLAN_TIMEOUT}s[/dim]"
-    )
-    raw = _call_claude(_get_prompt("brain_plan", _PLAN_SYSTEM), user_msg, _PLAN_TIMEOUT)
+    with console.status("[cyan]Planning with Claude Opus 4.6...[/cyan]", spinner="dots"):
+        raw = _call_claude(_get_prompt("brain_plan", _PLAN_SYSTEM), user_msg, _PLAN_TIMEOUT)
 
     # Strategy 1: whole response is valid JSON array
     try:
         tasks = json.loads(raw)
         if isinstance(tasks, list):
+            console.print(f"  [dim]✓ Claude returned {len(tasks)} task(s)[/dim]")
             return tasks
     except json.JSONDecodeError:
         pass
@@ -408,6 +496,7 @@ def plan_tasks(
         try:
             tasks = json.loads(m.group(1))
             if isinstance(tasks, list):
+                console.print(f"  [dim]✓ Claude returned {len(tasks)} task(s)[/dim]")
                 return tasks
         except json.JSONDecodeError:
             pass

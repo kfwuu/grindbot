@@ -74,8 +74,21 @@ def scan(path: str, goal: str) -> None:
         console.print(
             f"[dim]Detected languages: {', '.join(langs)} ({lang_file_count} file(s))[/dim]"
         )
-    console.print("[dim]Collecting source files...[/dim]")
-    source_context = collect_source_files(project_path)
+
+    from . import codebase_map as _cmap
+    if _cmap.map_needs_rebuild(grindbot_dir, project_path):
+        _cmap.build_map(project_path, grindbot_dir, console)
+    map_ctx = _cmap.get_map_context(grindbot_dir)
+
+    # When a codebase map exists, only send hot files (not all 219 files).
+    # This cuts scan cost from ~120 credits to ~10.
+    if map_ctx:
+        source_context = _cmap.get_hot_file_contents(grindbot_dir, project_path)
+        console.print(f"[dim]Using codebase map + hot files (lightweight scan)[/dim]")
+    else:
+        with console.status("[cyan]Collecting source files...[/cyan]", spinner="dots"):
+            source_context = collect_source_files(project_path)
+
     if not source_context.strip():
         console.print("[red]No source files found.[/red]")
         sys.exit(1)
@@ -90,7 +103,7 @@ def scan(path: str, goal: str) -> None:
 
     brain.reset_task_credits()
     try:
-        raw_tasks = brain.plan_tasks(source_context, goal=goal)
+        raw_tasks = brain.plan_tasks(source_context, goal=goal, map_context=map_ctx)
     except RuntimeError as exc:
         console.print(f"[red]Scan failed: {exc}[/red]")
         sys.exit(1)

@@ -4,7 +4,7 @@
 import { useState } from 'react'
 
 const PRESET_COMMANDS = [
-  { label: 'claude',       command: 'claude',   args: [] },
+  { label: 'claude',       command: 'claude',   args: ['--dangerously-skip-permissions', '--model', 'claude-sonnet-4-6'] },
   { label: 'gemini',       command: 'gemini',   args: [] },
   { label: 'bash',         command: 'bash',     args: [] },
   { label: 'grindbot grind', command: 'grindbot', args: ['grind'] },

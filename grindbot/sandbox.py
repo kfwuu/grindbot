@@ -77,7 +77,7 @@ def execute_task_in_sandbox(
 
     ssh_key = env_vals.get("GRINDBOT_SSH_KEY", str(Path.home() / ".ssh" / "id_ed25519"))
 
-    console.print(f"    [dim]🔥 Connecting to {server}...[/dim]")
+    console.print(f"  [dim]🔥 Connecting to {server}...[/dim]")
 
     # Build payload
     try:
@@ -93,7 +93,7 @@ def execute_task_in_sandbox(
         "gemini_run_timeout": _GEMINI_RUN_TIMEOUT,
     })
 
-    console.print("    [dim]🔥 Uploading repo and booting VM...[/dim]")
+    console.print("  [dim]🔥 Uploading repo and booting VM...[/dim]")
 
     ssh_cmd = [
         "ssh",
@@ -142,7 +142,9 @@ def execute_task_in_sandbox(
     data["stderr"] = _sanitize(data.get("stderr", ""), gemini_key)
 
     if data.get("success"):
-        console.print("    [dim]🔥 VM done, diff received.[/dim]")
+        console.print("  [dim]🔥 VM done, diff received.[/dim]")
+    elif data.get("stderr"):
+        console.print(f"  [red]!! VM error:[/red] {data['stderr'][:300]}")
     return data
 
 

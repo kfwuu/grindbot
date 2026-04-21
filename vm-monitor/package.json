@@ -1,0 +1,132 @@
+{
+  "name": "dashdot",
+  "version": "0.0.0",
+  "description": "dash. - a modern server dashboard",
+  "license": "MIT",
+  "private": true,
+  "repository": "https://github.com/MauriceNino/dashdot",
+  "homepage": "https://getdashdot.com",
+  "author": "MauriceNino <mauriceprivat98@gmail.com>",
+  "bugs": {
+    "url": "https://github.com/MauriceNino/dashdot/issues"
+  },
+  "keywords": [
+    "monitoring",
+    "dashboard",
+    "server",
+    "glassmorphism"
+  ],
+  "scripts": {
+    "start": "cross-env NODE_ENV=production yarn workspace @dashdot/server start",
+    "cli": "node apps/cli/dist/index.js",
+    "build": "turbo run build",
+    "build:prod": "cross-env NODE_ENV=production turbo run build --filter=@dashdot/view --filter=@dashdot/server --filter=@dashdot/cli",
+    "dev": "turbo run dev",
+    "dev:docker": "docker compose -p dashdot_dev -f ./docker/docker-compose.dev.yml up --build --remove-orphans",
+    "dev:docker:proxy": "docker compose -p dashdot_dev -f ./docker/docker-compose.proxy.yml up --build --remove-orphans",
+    "test": "turbo run test",
+    "lint": "biome check",
+    "fix": "biome check --write",
+    "postinstall": "husky install"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.13",
+    "@commitlint/cli": "20.3.1",
+    "@commitlint/config-conventional": "20.3.1",
+    "@commitlint/cz-commitlint": "20.3.1",
+    "@semantic-release-plus/docker": "3.1.3",
+    "@semantic-release/changelog": "6.0.3",
+    "@semantic-release/git": "10.0.1",
+    "commitizen": "4.3.1",
+    "cross-env": "10.1.0",
+    "husky": "9.1.7",
+    "inquirer": "9.3.8",
+    "semantic-release": "25.0.3",
+    "semantic-release-plus": "19.0.2",
+    "turbo": "^2.7.2",
+    "typescript": "5.9.3"
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ],
+    "rules": {
+      "body-max-line-length": [
+        1,
+        "always",
+        100
+      ],
+      "footer-max-line-length": [
+        1,
+        "always",
+        100
+      ]
+    }
+  },
+  "release": {
+    "branches": [
+      "main",
+      "dev"
+    ],
+    "plugins": [
+      [
+        "@semantic-release/commit-analyzer",
+        {
+          "releaseRules": [
+            {
+              "type": "docs",
+              "release": "patch"
+            },
+            {
+              "type": "chore",
+              "release": "patch"
+            },
+            {
+              "type": "refactor",
+              "release": "patch"
+            },
+            {
+              "type": "ci",
+              "release": "patch"
+            }
+          ]
+        }
+      ],
+      "@semantic-release/release-notes-generator",
+      [
+        "@semantic-release/changelog",
+        {
+          "changelogFile": ".github/CHANGELOG.md"
+        }
+      ],
+      [
+        "@semantic-release/github",
+        {
+          "successComment": ":tada: This issue has been resolved in version ${nextRelease.version}\n\nPlease check the [changelog](https://github.com/MauriceNino/dashdot/blob/main/.github/CHANGELOG.md) for more details.",
+          "successCommentCondition": "<% return issue.user.type !== 'Bot'; %>",
+          "failComment": false,
+          "failTitle": false,
+          "labels": false,
+          "releasedLabels": false
+        }
+      ],
+      [
+        "@semantic-release/git",
+        {
+          "assets": [
+            ".github/CHANGELOG.md"
+          ],
+          "message": "chore(release): ${nextRelease.version} [CI SKIP]\n\n${nextRelease.notes}"
+        }
+      ]
+    ]
+  },
+  "packageManager": "yarn@4.12.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

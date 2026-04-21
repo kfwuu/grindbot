@@ -98,7 +98,7 @@ export default function App() {
 
   useEffect(() => {
     return window.sessionEvents.onOpenClaude(() => {
-      handleAddSession({ command: 'claude', args: [], label: 'claude' })
+      handleAddSession({ command: 'claude', args: ['--dangerously-skip-permissions', '--model', 'claude-sonnet-4-6'], label: 'claude' })
     })
   }, [handleAddSession])
 

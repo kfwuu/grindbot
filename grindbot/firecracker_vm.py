@@ -85,9 +85,6 @@ class FirecrackerVM:
             check=True,
         )
 
-        # Patch netplan in the copy so the VM gets the right static IP
-        _patch_netplan(rootfs_path, vm_ip, host_ip)
-
         # Create tap interface for this VM
         subprocess.run(["ip", "tuntap", "add", tap_name, "mode", "tap"], check=True)
         subprocess.run(["ip", "addr", "add", f"{host_ip}/24", "dev", tap_name], check=True)
@@ -124,9 +121,9 @@ class FirecrackerVM:
                 check=False,
             )
 
-        # Write per-VM Firecracker config
+        # Write per-VM Firecracker config (IP passed via kernel arg — no netplan needed)
         config_path = _VM_DIR / f"config-{vm_id}.json"
-        config_path.write_text(_build_fc_config(rootfs_path, tap_name))
+        config_path.write_text(_build_fc_config(rootfs_path, tap_name, vm_ip, host_ip))
 
         # Start Firecracker process
         log_path = _VM_DIR / f"serial-{vm_id}.log"
@@ -138,6 +135,10 @@ class FirecrackerVM:
 
         vm = cls(vm_id, tap_name, vm_ip, subnet_idx, rootfs_path, config_path, log_path, proc)
         vm._wait_for_ssh(timeout=90)
+
+        # Write DNS config now that SSH is up (kernel ip= doesn't set resolv.conf)
+        vm.run("echo 'nameserver 8.8.8.8' > /etc/resolv.conf", timeout=10)
+
         return vm
 
     def run(
@@ -303,58 +304,26 @@ def _free_subnet(idx: int) -> None:
         pass
 
 
-def _patch_netplan(rootfs_path: Path, vm_ip: str, host_ip: str) -> None:
-    """Mount *rootfs_path* and write a static-IP netplan config.
 
-    Args:
-        rootfs_path: Path to the ext4 image to patch.
-        vm_ip: IP address to assign to eth0 inside the VM (e.g. 172.16.1.2).
-        host_ip: Gateway IP on the host side of the tap (e.g. 172.16.1.1).
-    """
-    mnt = Path(f"/tmp/fc-mnt-{uuid.uuid4().hex[:6]}")
-    mnt.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["mount", "-o", "loop", str(rootfs_path), str(mnt)], check=True)
-    try:
-        netplan_dir = mnt / "etc" / "netplan"
-        netplan_dir.mkdir(parents=True, exist_ok=True)
-        config = (
-            "network:\n"
-            "  version: 2\n"
-            "  ethernets:\n"
-            "    eth0:\n"
-            "      addresses:\n"
-            f"        - {vm_ip}/24\n"
-            "      routes:\n"
-            "        - to: 0.0.0.0/0\n"
-            f"          via: {host_ip}\n"
-            "      nameservers:\n"
-            "        addresses:\n"
-            "          - 8.8.8.8\n"
-        )
-        (netplan_dir / "01-eth0.yaml").write_text(config)
-    finally:
-        subprocess.run(["umount", str(mnt)], check=False)
-        try:
-            mnt.rmdir()
-        except Exception:
-            pass
-
-
-def _build_fc_config(rootfs_path: Path, tap_name: str) -> str:
+def _build_fc_config(rootfs_path: Path, tap_name: str, vm_ip: str, host_ip: str) -> str:
     """Return the Firecracker JSON config for one VM instance.
 
     Args:
         rootfs_path: Path to this VM's private rootfs copy.
         tap_name: Host tap interface name (e.g. tap1).
+        vm_ip: IP to assign inside the VM (e.g. 172.16.1.2).
+        host_ip: Gateway IP on the host tap side (e.g. 172.16.1.1).
 
     Returns:
         JSON string suitable for ``firecracker --config-file``.
     """
+    # ip= format: <client>:<server>:<gw>:<mask>:<hostname>:<dev>:<autoconf>
+    ip_arg = f"ip={vm_ip}::{host_ip}:255.255.255.0::eth0:off"
     return json.dumps(
         {
             "boot-source": {
                 "kernel_image_path": str(_KERNEL),
-                "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
+                "boot_args": f"console=ttyS0 reboot=k panic=1 pci=off {ip_arg}",
             },
             "drives": [
                 {

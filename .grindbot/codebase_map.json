@@ -1,0 +1,40 @@
+{
+  "built_at": "2026-04-21T23:21:24.466233+00:00",
+  "commit_at_build": "dc81b99",
+  "entry_points": [
+    "main.py",
+    "grindbot/cli.py",
+    "pixel-agents/src/extension.ts",
+    "pixel-agents/webview-ui/src/main.tsx"
+  ],
+  "core_dirs": {
+    "grindbot/": "Autonomous AI coding agent: planning, execution, validation in isolated worktrees",
+    "pixel-agents/src/": "VS Code extension for pixel-art agent visualization",
+    "pixel-agents/webview-ui/src/": "React webview UI with isometric office renderer",
+    "pixel-agents/server/": "Hook server for Claude Code session event delivery",
+    "e2b/": "Docker/sandbox template for E2B (legacy, replaced by Firecracker)",
+    "pixel-agents/shared/assets/": "Shared sprite/asset loading and PNG decoding utilities"
+  },
+  "patterns": [
+    "Python agent orchestration: scanner \u2192 planner \u2192 executor \u2192 validator \u2192 reflector pipeline",
+    "Rich Console for all Python output, never bare print()",
+    "All git operations abstracted through worktree.py module",
+    "Dual-mode session detection: hooks (preferred) vs heuristic JSONL polling fallback",
+    "Firecracker microVM sandboxing replacing E2B for task isolation",
+    "VS Code webview with Vite+React frontend and isometric pixel-art rendering"
+  ],
+  "skip_hints": [
+    "pixel-agents/ is a separate VS Code extension project \u2014 skip if task targets grindbot only",
+    "termmux/ is a minimal Electron skeleton with no meaningful source yet",
+    ".grindbot/sessions/ contains ephemeral session logs \u2014 skip for structural analysis"
+  ],
+  "hot_files": [
+    "grindbot/executor.py",
+    "grindbot/firecracker_vm.py",
+    "grindbot/sandbox.py",
+    "grindbot/cli.py",
+    "main.py"
+  ],
+  "task_history": {},
+  "danger_zones": {}
+}

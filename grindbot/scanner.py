@@ -136,12 +136,6 @@ def _collect_source_files(project_path: Path) -> str:
 
         chunk = f"=== {rel.as_posix()} ===\n{content}\n"
 
-        # Show each file as it's collected: [idx/total]  path  (N lines)
-        line_count = content.count("\n")
-        console.print(
-            f"  [dim][{idx}/{total_files}][/dim]  [cyan]{rel.as_posix()}[/cyan]"
-            f"  [dim]{line_count} lines[/dim]"
-        )
         parts.append(chunk)
 
     included = len(parts)
