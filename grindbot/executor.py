@@ -889,7 +889,7 @@ def execute_task(
             target_file = worktree_path / file_hint
             if target_file.exists():
                 try:
-                    file_preview = target_file.read_text(encoding="utf-8")
+                    file_preview = target_file.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     pass
 
@@ -918,7 +918,7 @@ def execute_task(
 
         if use_sandbox:
             from . import sandbox as _sb
-            console.print("    [dim]Running Gemini in E2B sandbox...[/dim]")
+            console.print("    [dim]Running Gemini in Firecracker VM...[/dim]")
             # Upload the WORKTREE (clean git checkout), not repo_root.
             # This guarantees the sandbox baseline matches the worktree exactly,
             # so the returned diff applies cleanly.

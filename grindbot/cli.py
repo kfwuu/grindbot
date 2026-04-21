@@ -153,7 +153,7 @@ def scan(path: str, goal: str) -> None:
     "use_sandbox",
     is_flag=True,
     default=False,
-    help="Run tasks in E2B cloud VMs instead of local worktrees.",
+    help="Run tasks in Firecracker microVMs on your remote server.",
 )
 @click.option(
     "--no-sync",
@@ -190,7 +190,7 @@ def grind(path: Path, limit: int, dry_run: bool, no_reflect: bool, workers: int,
     executor.load_prompt_overrides(store)
 
     if use_sandbox:
-        console.print("[bold cyan]Sandbox mode:[/bold cyan] tasks will run in E2B cloud VMs.")
+        console.print("[bold cyan]Sandbox mode:[/bold cyan] tasks will run in Firecracker microVMs on your server.")
 
     tasks, grind_credits, session_id = run_grind(
         grindbot_dir, console, limit=limit, dry_run=dry_run,
@@ -252,7 +252,7 @@ def _normalise_id(raw: str) -> str:
     "use_sandbox",
     is_flag=True,
     default=False,
-    help="Run retried tasks in E2B cloud VMs instead of local worktrees.",
+    help="Run retried tasks in Firecracker microVMs on your remote server.",
 )
 def retry(ids: tuple[str, ...], all_failed: bool, reset_only: bool, path: Path, use_sandbox: bool) -> None:
     """Reset failed or completed tasks and re-run them.
@@ -343,7 +343,7 @@ def retry(ids: tuple[str, ...], all_failed: bool, reset_only: bool, path: Path, 
 
     # --- Full retry: reset + execute ----------------------------------------
     if use_sandbox:
-        console.print("[bold cyan]Sandbox mode:[/bold cyan] tasks will run in E2B cloud VMs.")
+        console.print("[bold cyan]Sandbox mode:[/bold cyan] tasks will run in Firecracker microVMs on your server.")
     tasks = retry_tasks(target_ids, grindbot_dir, console, use_sandbox=use_sandbox)
     reporter.show_grind_report(tasks, str(grindbot_dir.parent))
 
