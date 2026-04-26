@@ -389,6 +389,7 @@ def _run_single_file(
         env["GEMINI_SYSTEM_MD"] = str(system_md_path)
 
     tmp_path: Optional[str] = None
+    proc: Optional[subprocess.Popen] = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, encoding="utf-8"
@@ -396,18 +397,17 @@ def _run_single_file(
             tmp.write(file_content)
             tmp_path = tmp.name
 
-        stdin_fh = open(tmp_path, encoding="utf-8")
-        proc = subprocess.Popen(
-            [gemini_path, "--model", model, "-p", prompt, *_gemini_safety_flags()],
-            cwd=str(cwd),
-            stdin=stdin_fh,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            env=env,
-        )
-        stdin_fh.close()
+        with open(tmp_path, encoding="utf-8") as stdin_fh:
+            proc = subprocess.Popen(
+                [gemini_path, "--model", model, "-p", prompt, *_gemini_safety_flags()],
+                cwd=str(cwd),
+                stdin=stdin_fh,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
 
         stdout_lines: list[str] = []
 
@@ -481,6 +481,8 @@ def _run_tool_mode(
     if system_md_path is not None and system_md_path.exists():
         env["GEMINI_SYSTEM_MD"] = str(system_md_path)
 
+    proc: Optional[subprocess.Popen] = None
+    stderr_thread: Optional[threading.Thread] = None
     try:
         proc = subprocess.Popen(
             [gemini_path, "--model", model, *_gemini_safety_flags()],
@@ -496,7 +498,7 @@ def _run_tool_mode(
         stdout_lines: list[str] = []
 
         def _read_stdout() -> None:
-            assert proc.stdout is not None
+            assert proc is not None and proc.stdout is not None
             for ln in proc.stdout:
                 stdout_lines.append(ln)
 
@@ -512,7 +514,7 @@ def _run_tool_mode(
         stderr_lines: list[str] = []
 
         def _drain_stderr():
-            assert proc.stderr is not None
+            assert proc is not None and proc.stderr is not None
             for line in proc.stderr:
                 text = line.rstrip('\n')
                 if text:
@@ -530,19 +532,23 @@ def _run_tool_mode(
         return proc.returncode, "".join(stdout_lines)
 
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        stderr_thread.join(timeout=5)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
         return -1, ""
     except Exception as exc:
         console.print(f"[red]Gemini process error: {exc}[/red]")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        stderr_thread.join(timeout=5)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
         return -2, ""
 
 
@@ -1143,17 +1149,26 @@ def execute_task(
                     console.print(f"  [red]!! Merge failed:[/red] {merge_err}")
                     task["status"] = "failed"
                     task["error"] = f"Merge failed: {merge_err}"
-                    try:
-                        wt.close_github_pr(repo_root, branch_name)
-                    except Exception:
-                        pass
-                    try:
-                        wt._delete_branch(repo_root, branch_name)
-                    except Exception:
-                        pass
-                    return task
+                    # Defer cleanup until after lock release so a slow/failing
+                    # cleanup can't block other tasks from acquiring the lock.
+                else:
+                    merge_ok = True
 
-                merge_ok = True
+            # Cleanup stale branch outside the lock if merge failed.
+            if task["status"] == "failed":
+                pr_closed, pr_close_err = wt.close_github_pr(repo_root, branch_name)
+                if not pr_closed:
+                    console.print(
+                        f"  [yellow][!] PR close failed: {pr_close_err}[/yellow]"
+                    )
+                deleted, del_err = wt._delete_branch(repo_root, branch_name)
+                if not deleted:
+                    console.print(
+                        f"  [yellow][!] Stale branch {branch_name} could not be deleted: "
+                        f"{del_err}. Run `git branch -D {branch_name}` manually.[/yellow]"
+                    )
+                    task["cleanup_error"] = f"branch delete failed: {del_err}"
+                return task
 
         console.print(f"  [green]✓ Merged → {branch_name}[/green]")
 
