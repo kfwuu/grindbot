@@ -481,6 +481,8 @@ def _run_tool_mode(
     if system_md_path is not None and system_md_path.exists():
         env["GEMINI_SYSTEM_MD"] = str(system_md_path)
 
+    proc = None
+    stderr_thread = None
     try:
         proc = subprocess.Popen(
             [gemini_path, "--model", model, *_gemini_safety_flags()],
@@ -530,19 +532,23 @@ def _run_tool_mode(
         return proc.returncode, "".join(stdout_lines)
 
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        stderr_thread.join(timeout=5)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
         return -1, ""
     except Exception as exc:
         console.print(f"[red]Gemini process error: {exc}[/red]")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        stderr_thread.join(timeout=5)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
         return -2, ""
 
 
@@ -1131,6 +1137,19 @@ def execute_task(
                     pr_ref = pr_number if pr_number.isdigit() else branch_name
                     # Step 3: merge via gh pr merge
                     merged, merge_err = wt.merge_github_pr(repo_root, pr_ref)
+                    if not merged:
+                        console.print(f"  [red]!! GitHub PR merge failed:[/red] {merge_err}")
+                        task["status"] = "failed"
+                        task["error"] = f"GitHub PR merge failed: {merge_err}"
+                        try:
+                            wt.close_github_pr(repo_root, branch_name)
+                        except Exception:
+                            pass
+                        try:
+                            wt._delete_branch(repo_root, branch_name)
+                        except Exception:
+                            console.print(f"  [yellow]Warning: failed to delete branch {branch_name} after GitHub PR merge failure.[/yellow]")
+                        return task
                 else:
                     # No gh CLI or no GitHub remote — fall back to local merge
                     console.print(
@@ -1138,20 +1157,15 @@ def execute_task(
                         " falling back to local merge.[/yellow]"
                     )
                     merged, merge_err = wt.merge_branch(repo_root, branch_name)
-
-                if not merged:
-                    console.print(f"  [red]!! Merge failed:[/red] {merge_err}")
-                    task["status"] = "failed"
-                    task["error"] = f"Merge failed: {merge_err}"
-                    try:
-                        wt.close_github_pr(repo_root, branch_name)
-                    except Exception:
-                        pass
-                    try:
-                        wt._delete_branch(repo_root, branch_name)
-                    except Exception:
-                        pass
-                    return task
+                    if not merged:
+                        console.print(f"  [red]!! Local merge fallback failed:[/red] {merge_err}")
+                        task["status"] = "failed"
+                        task["error"] = f"Local merge fallback failed: {merge_err}"
+                        try:
+                            wt._delete_branch(repo_root, branch_name)
+                        except Exception:
+                            console.print(f"  [yellow]Warning: failed to delete branch {branch_name} after local merge failure.[/yellow]")
+                        return task
 
                 merge_ok = True
 
