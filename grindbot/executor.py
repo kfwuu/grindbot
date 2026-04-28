@@ -481,6 +481,8 @@ def _run_tool_mode(
     if system_md_path is not None and system_md_path.exists():
         env["GEMINI_SYSTEM_MD"] = str(system_md_path)
 
+    proc = None
+    stderr_thread = None
     try:
         proc = subprocess.Popen(
             [gemini_path, "--model", model, *_gemini_safety_flags()],
@@ -530,19 +532,23 @@ def _run_tool_mode(
         return proc.returncode, "".join(stdout_lines)
 
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        stderr_thread.join(timeout=5)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
         return -1, ""
     except Exception as exc:
         console.print(f"[red]Gemini process error: {exc}[/red]")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        stderr_thread.join(timeout=5)
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
         return -2, ""
 
 
